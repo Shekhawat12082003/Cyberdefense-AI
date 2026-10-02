@@ -11,6 +11,9 @@ import SOC        from './pages/SOC'
 import Chatbot    from './pages/Chatbot'
 import AuditLog   from './pages/AuditLog'
 import Network    from './pages/Network'
+import CyberLab   from './pages/CyberLab'
+import Incidents  from './pages/Incidents'
+import IncidentView from './pages/IncidentView'
 
 // ══════════════════════════════════════════════════════════
 // TOKEN CHECK HOOK
@@ -203,6 +206,21 @@ export default function App() {
         {/* Network Traffic Analyser */}
         <Route path="/network" element={
           <PrivateRoute><Network /></PrivateRoute>
+        } />
+
+        {/* Cyber Lab — attack simulation */}
+        <Route path="/lab" element={
+          <PrivateRoute><CyberLab /></PrivateRoute>
+        } />
+
+        {/* Incidents list */}
+        <Route path="/incidents" element={
+          <PrivateRoute><Incidents /></PrivateRoute>
+        } />
+
+        {/* Incident detail view */}
+        <Route path="/incidents/:id" element={
+          <PrivateRoute><IncidentView /></PrivateRoute>
         } />
 
         {/* Catch all unknown routes */}

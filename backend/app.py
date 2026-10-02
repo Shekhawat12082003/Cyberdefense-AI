@@ -39,6 +39,17 @@ except Exception:
     limiter = None
     LIMITER_AVAILABLE = False
 
+
+def rate_limit(rule: str):
+    """Return active limiter decorator when available, otherwise no-op."""
+    if LIMITER_AVAILABLE and limiter is not None:
+        return limiter.limit(rule)
+
+    def _noop(func):
+        return func
+
+    return _noop
+
 # ── Webhook ───────────────────────────────────────────────
 try:
     from utils.webhooks import send_webhook_alert
@@ -926,7 +937,7 @@ network_thread.start()
 
 
 @app.route('/api/network/connections')
-@limiter.limit("30 per minute")
+@rate_limit("30 per minute")
 def network_connections():
     if not verify_token(request):
         return jsonify({'error': 'Unauthorized'}), 401
@@ -938,7 +949,7 @@ def network_connections():
 
 
 @app.route('/api/network/stats')
-@limiter.limit("30 per minute")
+@rate_limit("30 per minute")
 def network_stats():
     if not verify_token(request):
         return jsonify({'error': 'Unauthorized'}), 401
@@ -946,12 +957,15 @@ def network_stats():
     m = get_monitor()
     if m is None:
         return jsonify({'total_connections': 0, 'suspicious_ips': 0,
-                        'alerts_today': 0, 'bytes_sent_mb': 0})
+                        'alerts_today': 0, 'bytes_sent_mb': 0,
+                        'capture_mode': 'unavailable', 'local_ip': '',
+                        'packets_captured': 0, 'scans_detected': 0,
+                        'brute_force_detected': 0})
     return jsonify(m.get_stats())
 
 
 @app.route('/api/network/alerts')
-@limiter.limit("30 per minute")
+@rate_limit("30 per minute")
 def network_alerts():
     if not verify_token(request):
         return jsonify({'error': 'Unauthorized'}), 401
@@ -963,25 +977,871 @@ def network_alerts():
 
 
 @app.route('/api/network/packets')
-@limiter.limit("30 per minute")
+@rate_limit("30 per minute")
 def network_packets():
     if not verify_token(request):
         return jsonify({'error': 'Unauthorized'}), 401
     from models.network_monitor import get_monitor
     m = get_monitor()
     if m is None:
-        return jsonify({'packets': []})
+        return jsonify({'packets': [], 'error': 'Monitor not ready'})
     return jsonify({'packets': m.get_packets()})
 
 
-@app.route('/api/network/audit-log')
-@limiter.limit("30 per minute")
-def network_audit_log_route():
-    if not verify_token(request):
+# ═════════════════════════════════════════════════════════
+# UNIFIED SECURITY EVENTS
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/events', methods=['GET'])
+def get_events():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.db import get_security_events
+    limit       = int(request.args.get('limit', 200))
+    scenario_id = request.args.get('scenario_id')
+    event_type  = request.args.get('event_type')
+    severity    = request.args.get('severity')
+    events = get_security_events(limit=limit, scenario_id=scenario_id,
+                                  event_type=event_type, severity=severity)
+    return jsonify({'events': events, 'count': len(events)})
+
+
+# ═════════════════════════════════════════════════════════
+# INCIDENTS
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/incidents', methods=['GET'])
+def get_incidents():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.incident_manager import get_all_incidents
+    limit  = int(request.args.get('limit', 100))
+    status = request.args.get('status')
+    return jsonify({'incidents': get_all_incidents(limit=limit, status=status)})
+
+
+@app.route('/api/incidents/<incident_id>', methods=['GET'])
+def get_incident(incident_id):
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.incident_manager import get_incident as _get_inc
+    inc = _get_inc(incident_id)
+    if not inc:
+        return jsonify({'error': 'Not found'}), 404
+    return jsonify(inc)
+
+
+@app.route('/api/incidents/<incident_id>/investigate', methods=['GET'])
+def investigate_incident(incident_id):
+    """AI-assisted incident investigation using actual event data."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.incident_manager import get_incident as _get_inc
+    from utils.chatbot import chat as ai_chat
+
+    inc = _get_inc(incident_id)
+    if not inc:
+        return jsonify({'error': 'Not found'}), 404
+
+    # Build investigation prompt from real incident data
+    timeline_entries = inc.get('timeline', [])
+    timeline_str = '\n'.join(
+        f"  [{e.get('time','?')[:19]}] {e.get('event','?')}"
+        for e in (timeline_entries if isinstance(timeline_entries, list) else [])[:10]
+    )
+
+    geo = inc.get('geo_info') or {}
+    geo_str = f"{geo.get('city','?')}, {geo.get('country','?')}" if isinstance(geo, dict) and geo.get('country') else 'Local/Private'
+
+    prompt = (
+        f"Analyze this security incident and provide a concise investigation summary:\n\n"
+        f"Incident ID: {inc.get('id')}\n"
+        f"Attack Type: {inc.get('attack_type')}\n"
+        f"Severity: {inc.get('severity')}\n"
+        f"Risk Score: {inc.get('risk_score')}/100\n"
+        f"Source IP: {inc.get('source_ip') or 'Unknown'}\n"
+        f"Source Location: {geo_str}\n"
+        f"Process: {inc.get('process_name') or 'Unknown'} (PID {inc.get('process_pid') or 'Unknown'})\n"
+        f"Files Affected: {inc.get('files_affected', 0)}\n"
+        f"Honeypot Hit: {inc.get('honeypot_hit')}\n"
+        f"ML Prediction: {inc.get('ml_prediction') or 'N/A'} ({inc.get('ml_confidence', 0):.1f}%)\n"
+        f"Response: {inc.get('response')}\n\n"
+        f"Timeline:\n{timeline_str or 'No timeline data'}\n\n"
+        f"Provide: 1) What happened 2) Why classified as {inc.get('attack_type')} "
+        f"3) What actions were taken. Use ONLY the data above. "
+        f"If information is unavailable, say 'Not available from collected telemetry'."
+    )
+
+    try:
+        investigation = ai_chat(prompt, context={}, history=[])
+    except Exception:
+        investigation = (
+            f"Incident {inc.get('id')} involves a {inc.get('attack_type')} attack "
+            f"with risk score {inc.get('risk_score')}/100. "
+            f"Source: {inc.get('source_ip') or 'Unknown'}. "
+            f"Response: {inc.get('response') or 'Monitoring'}."
+        )
+
+    return jsonify({
+        'incident_id':   incident_id,
+        'investigation': investigation,
+        'incident':      inc,
+    })
+
+
+@app.route('/api/incidents/<incident_id>/evidence', methods=['GET'])
+def get_incident_evidence(incident_id):
+    """Get or generate forensic evidence bundle for an incident."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.incident_manager import get_incident as _get_inc
+    from utils.forensic_evidence import preserve_evidence, get_evidence_bundle
+    from utils.db import get_security_events, get_honeypot_triggers
+
+    inc = _get_inc(incident_id)
+    if not inc:
+        return jsonify({'error': 'Not found'}), 404
+
+    # Return cached bundle if exists
+    bundle = get_evidence_bundle(incident_id)
+    if bundle:
+        return jsonify({'bundle': bundle, 'cached': True})
+
+    # Generate new bundle
+    scenario_id = inc.get('scenario_id')
+    events    = get_security_events(limit=50, scenario_id=scenario_id) if scenario_id else []
+    hp_events = get_honeypot_triggers(limit=20)
+
+    result = preserve_evidence(
+        incident=inc,
+        events=events,
+        honeypot_events=hp_events,
+    )
+
+    bundle = get_evidence_bundle(incident_id)
+    return jsonify({'bundle': bundle, 'cached': False, 'hash': result.get('evidence_hash')})
+
+
+@app.route('/api/incidents/<incident_id>/replay', methods=['GET'])
+def replay_incident(incident_id):
+    """Return the recorded event sequence for incident replay."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.incident_manager import get_incident as _get_inc
+    from utils.db import get_security_events
+
+    inc = _get_inc(incident_id)
+    if not inc:
+        return jsonify({'error': 'Not found'}), 404
+
+    scenario_id = inc.get('scenario_id')
+    events = get_security_events(limit=200, scenario_id=scenario_id) if scenario_id else []
+
+    # Return in chronological order
+    events_sorted = sorted(events, key=lambda e: e.get('timestamp', ''))
+
+    return jsonify({
+        'incident_id': incident_id,
+        'incident':    inc,
+        'events':      events_sorted,
+        'event_count': len(events_sorted),
+    })
+
+
+@app.route('/api/incidents/<incident_id>/attack-graph', methods=['GET'])
+def get_attack_graph(incident_id):
+    """Build attack graph nodes and edges from incident events."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.incident_manager import get_incident as _get_inc
+    from utils.db import get_security_events
+
+    inc = _get_inc(incident_id)
+    if not inc:
+        return jsonify({'error': 'Not found'}), 404
+
+    scenario_id = inc.get('scenario_id')
+    events = get_security_events(limit=100, scenario_id=scenario_id) if scenario_id else []
+
+    nodes = {}
+    edges = []
+
+    def _add_node(node_id, label, ntype, severity='LOW'):
+        if node_id not in nodes:
+            nodes[node_id] = {'id': node_id, 'label': label, 'type': ntype, 'severity': severity}
+
+    def _add_edge(src, dst, label=''):
+        edge = {'source': src, 'target': dst, 'label': label}
+        if edge not in edges:
+            edges.append(edge)
+
+    # Source IP node
+    src_ip = inc.get('source_ip')
+    if src_ip:
+        _add_node(f'ip_{src_ip}', src_ip, 'ip', inc.get('severity', 'LOW'))
+
+    # Process node
+    proc = inc.get('process_name')
+    if proc:
+        _add_node(f'proc_{proc}', proc, 'process', 'HIGH')
+        if src_ip:
+            _add_edge(f'ip_{src_ip}', f'proc_{proc}', 'spawned')
+
+    for ev in events:
+        etype = ev.get('event_type', '')
+        sev   = ev.get('severity', 'LOW')
+
+        if 'HONEYPOT' in etype:
+            hp_res = (ev.get('honeypot') or {}).get('resource') or 'honeypot'
+            _add_node(f'hp_{hp_res}', hp_res, 'honeypot', 'CRITICAL')
+            if proc:
+                _add_edge(f'proc_{proc}', f'hp_{hp_res}', 'accessed')
+
+        elif 'FILE' in etype:
+            fname = (ev.get('file') or {}).get('name', 'file')
+            _add_node(f'file_{fname}', fname, 'file', sev)
+            if proc:
+                _add_edge(f'proc_{proc}', f'file_{fname}', 'created')
+
+        elif 'NETWORK' in etype or 'PORT_SCAN' in etype or 'BRUTE' in etype:
+            dst_ip = (ev.get('destination') or {}).get('ip') or 'target'
+            _add_node(f'dst_{dst_ip}', dst_ip, 'destination', sev)
+            ev_src = (ev.get('source') or {}).get('ip') or src_ip
+            if ev_src:
+                _add_node(f'ip_{ev_src}', ev_src, 'ip', sev)
+                _add_edge(f'ip_{ev_src}', f'dst_{dst_ip}', etype)
+
+    # ML Engine node
+    if inc.get('ml_prediction'):
+        _add_node('ml_engine', 'ML ENGINE', 'ml', inc.get('severity', 'LOW'))
+        if proc:
+            _add_edge(f'proc_{proc}', 'ml_engine', 'analysed')
+        _add_node('incident', 'INCIDENT', 'incident', inc.get('severity', 'LOW'))
+        _add_edge('ml_engine', 'incident', 'detected')
+        _add_node('response', f"RESPONSE: {inc.get('response','?')}", 'response', 'LOW')
+        _add_edge('incident', 'response', 'triggered')
+
+    return jsonify({
+        'nodes': list(nodes.values()),
+        'edges': edges,
+        'incident_id': incident_id,
+    })
+
+
+# ═════════════════════════════════════════════════════════
+# HONEYPOT
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/honeypot/files', methods=['GET'])
+def honeypot_files():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.honeypot import get_honeypot_files
+    return jsonify({'files': get_honeypot_files()})
+
+
+@app.route('/api/honeypot/triggers', methods=['GET'])
+def honeypot_triggers():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.db import get_honeypot_triggers
+    limit = int(request.args.get('limit', 100))
+    return jsonify({'triggers': get_honeypot_triggers(limit)})
+
+
+@app.route('/api/honeypot/status', methods=['GET'])
+def honeypot_status():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.honeypot import get_trigger_count, get_honeypot_files
+    return jsonify({
+        'active':        True,
+        'file_count':    len(get_honeypot_files()),
+        'trigger_count': get_trigger_count(),
+    })
+
+
+# ═════════════════════════════════════════════════════════
+# IP GEOLOCATION
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/geo/<path:ip>', methods=['GET'])
+def geolocate_ip(ip):
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.geo_lookup import geolocate, format_geo_display
+    geo = geolocate(ip)
+    return jsonify({
+        'ip':      ip,
+        'geo':     geo,
+        'display': format_geo_display(geo),
+    })
+
+
+# ═════════════════════════════════════════════════════════
+# EVIDENCE & VERIFICATION
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/evidence', methods=['GET'])
+def list_evidence():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.forensic_evidence import list_evidence_bundles
+    return jsonify({'bundles': list_evidence_bundles()})
+
+
+@app.route('/api/evidence/verify', methods=['POST'])
+def verify_evidence():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.forensic_evidence import verify_evidence as _verify
+    data     = request.get_json()
+    filepath = data.get('filepath', '')
+    expected = data.get('expected_hash', '')
+    if not filepath or not expected:
+        return jsonify({'error': 'filepath and expected_hash required'}), 400
+    return jsonify(_verify(filepath, expected))
+
+
+# ═════════════════════════════════════════════════════════
+# RISK SCORE
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/risk-score', methods=['POST'])
+def calculate_risk_score():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.risk_scorer import calculate_risk
+    data = request.get_json()
+    rs   = calculate_risk(
+        ml_prediction=data.get('ml_prediction'),
+        ml_confidence=data.get('ml_confidence', 0),
+        ml_score=data.get('ml_score', 0),
+        file_events=data.get('file_events', 0),
+        honeypot_hit=data.get('honeypot_hit', False),
+        honeypot_count=data.get('honeypot_count', 0),
+        network_alert=data.get('network_alert'),
+        network_severity=data.get('network_severity', 'LOW'),
+        process_suspicious=data.get('process_suspicious', False),
+        process_risk=data.get('process_risk', 'LOW'),
+        correlated_signals=data.get('correlated_signals', 0),
+    )
+    return jsonify(rs.to_dict())
+
+
+# ═════════════════════════════════════════════════════════
+# CYBER LAB (simulation control)
+# ═════════════════════════════════════════════════════════
+
+_lab_mode = False
+
+
+@app.route('/api/lab/mode', methods=['GET', 'POST'])
+def lab_mode():
+    global _lab_mode
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    if request.method == 'POST':
+        data = request.get_json()
+        _lab_mode = bool(data.get('enabled', False))
+        log_audit(user.get('username'), 'LAB_MODE_CHANGED', f'enabled={_lab_mode}')
+        return jsonify({'lab_mode': _lab_mode})
+    return jsonify({'lab_mode': _lab_mode})
+
+
+@app.route('/api/lab/simulate', methods=['POST'])
+def lab_simulate():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    from utils.attack_director import run_simulation, get_active_scenario, get_scenario_status
+    data     = request.get_json()
+    sim_type = data.get('type', '').strip().lower()
+
+    if not sim_type:
+        return jsonify({'error': 'type is required'}), 400
+
+    # Check both the live lock and the scenario status (covers fast-completing sims)
+    active = get_active_scenario()
+    if not active:
+        # Also check if any scenario is still marked RUNNING
+        statuses = get_scenario_status()
+        active = next((sid for sid, s in statuses.items()
+                       if s.get('status') == 'RUNNING'), None)
+
+    if active:
+        return jsonify({'error': f'Simulation already running: {active}'}), 409
+
+    scenario_id = run_simulation(sim_type)
+    if not scenario_id:
+        return jsonify({'error': f'Unknown simulation type: {sim_type}'}), 400
+
+    log_audit(user.get('username'), 'SIMULATION_STARTED', f'type={sim_type} scenario={scenario_id}')
+    return jsonify({'scenario_id': scenario_id, 'type': sim_type, 'status': 'STARTED'})
+
+
+@app.route('/api/lab/status', methods=['GET'])
+def lab_status():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    from utils.attack_director import get_active_scenario, get_scenario_status
+    from utils.honeypot import get_trigger_count
+
+    return jsonify({
+        'lab_mode':         _lab_mode,
+        'active_scenario':  get_active_scenario(),
+        'scenarios':        get_scenario_status(),
+        'ml_online':        True,
+        'blockchain_mode':  bc_logger.mode if bc_logger else 'unavailable',
+        'honeypot_active':  True,
+        'honeypot_triggers': get_trigger_count(),
+    })
+
+
+@app.route('/api/lab/stop', methods=['POST'])
+def lab_stop():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.attack_director import _end_scenario, get_active_scenario
+    active = get_active_scenario()
+    if active:
+        _end_scenario(active, status='STOPPED')
+        log_audit(user.get('username'), 'SIMULATION_STOPPED', active)
+        return jsonify({'message': f'Simulation {active} stopped'})
+    return jsonify({'message': 'No active simulation'})
+
+
+@app.route('/api/lab/reset', methods=['POST'])
+def lab_reset():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.db import get_sim_log
+    # Clear simulation log entries and watched dir
+    import sqlite3 as _sq
+    try:
+        conn = _sq.connect('cyberdefense.db')
+        conn.execute('DELETE FROM simulation_log')
+        conn.execute('DELETE FROM security_events')
+        conn.execute('DELETE FROM honeypot_triggers')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    # Clear watched folder
+    watched = os.path.join(os.path.dirname(__file__), 'watched')
+    cleared = 0
+    if os.path.exists(watched):
+        for f in os.listdir(watched):
+            try:
+                os.remove(os.path.join(watched, f))
+                cleared += 1
+            except Exception:
+                pass
+
+    log_audit(user.get('username'), 'LAB_RESET', f'cleared {cleared} files')
+    return jsonify({'message': f'Lab reset. Removed {cleared} files from watched/'})
+
+
+@app.route('/api/lab/logs/<scenario_id>', methods=['GET'])
+def lab_logs(scenario_id):
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.db import get_sim_log
+    return jsonify({'logs': get_sim_log(scenario_id)})
+
+
+@app.route('/api/lab/scenarios', methods=['GET'])
+def lab_scenarios():
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.attack_director import get_scenario_status
+    return jsonify({'scenarios': get_scenario_status()})
+
+
+# ═════════════════════════════════════════════════════════
+# NETWORK AUDIT LOG (existing api.js references this)
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/network/audit-log', methods=['GET'])
+def network_audit_log():
+    user = verify_token(request)
+    if not user:
         return jsonify({'error': 'Unauthorized'}), 401
     from utils.db import get_network_audit_logs
-    limit = min(int(request.args.get('limit', 500)), 1000)
+    limit = int(request.args.get('limit', 500))
     return jsonify(get_network_audit_logs(limit))
+
+
+def _build_live_incident_from_alert(alert: dict, scenario_id: str = None):
+    """Build and emit a live_incident payload from a network alert dict."""
+    import socket as _socket
+    try:
+        from utils.geo_lookup import geolocate, format_geo_display, is_private_ip
+        from utils.risk_scorer import calculate_risk
+        from utils.incident_manager import create_incident
+
+        ip        = alert.get('ip', '')
+        alert_type = alert.get('type', 'UNKNOWN')
+        severity  = alert.get('severity', 'HIGH')
+        desc      = alert.get('description', '')
+
+        geo_raw     = geolocate(ip) if ip else {}
+        geo_display = format_geo_display(geo_raw) if geo_raw else {}
+
+        local_ip = '127.0.0.1'
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+
+        rs = calculate_risk(
+            network_alert=alert_type,
+            network_severity=severity,
+            correlated_signals=3 if scenario_id else 2,
+        )
+
+        mitre_map = {
+            'PORT_SCAN':   ('T1046', 'Network Service Discovery'),
+            'BRUTE_FORCE': ('T1110', 'Brute Force'),
+            'C2_BEACON':   ('T1071', 'Application Layer Protocol'),
+            'DATA_EXFIL':  ('T1041', 'Exfiltration Over C2 Channel'),
+        }
+        mitre_id, mitre_name = mitre_map.get(alert_type, ('T1046', 'Network Activity'))
+
+        now = datetime.utcnow().isoformat()
+        dest_port = alert.get('target_port') or 0
+        protocol  = {'PORT_SCAN': 'TCP', 'BRUTE_FORCE': 'TCP', 'C2_BEACON': 'HTTPS', 'DATA_EXFIL': 'TCP'}.get(alert_type, 'TCP')
+
+        incident = create_incident(
+            attack_type=alert_type,
+            title=f'{alert_type.replace("_"," ")} from {ip}',
+            severity=severity,
+            scenario_id=scenario_id,
+            source_ip=ip,
+            dest_ip=local_ip,
+            dest_port=dest_port,
+            protocol=protocol,
+            geo_info=geo_display,
+            initial_events=[{'time': now, 'event': f'{alert_type} detected', 'description': desc, 'severity': severity}],
+        )
+
+        payload = {
+            'incident_id':   incident.get('id'),
+            'attack_type':   alert_type,
+            'title':         incident.get('title'),
+            'severity':      severity,
+            'risk_score':    rs.final_score,
+            'risk_level':    rs.risk_level,
+            'description':   desc,
+            'timestamp':     now,
+            'scenario_id':   scenario_id,
+            'attacker': {
+                'ip':       ip,
+                'port':     alert.get('source_port'),
+                'protocol': protocol,
+                'mac':      'Not observable remotely' if not is_private_ip(ip) else 'Unknown (local)',
+                'geo':      geo_display,
+            },
+            'target':        {'ip': local_ip, 'port': dest_port},
+            'network': {
+                'ports_hit':        alert.get('ports_hit', []),
+                'connection_count': alert.get('connection_count', 0),
+                'bytes_sent':       alert.get('bytes_sent', 0),
+                'target_port':      dest_port,
+                'protocol':         protocol,
+            },
+            'mitre':         {'id': mitre_id, 'name': mitre_name, 'url': f'https://attack.mitre.org/techniques/{mitre_id}/'},
+            'risk_factors':  rs.to_dict().get('factors', []),
+            'status': {
+                'detected':   True,
+                'honeypot':   False,
+                'ml':         False,
+                'quarantine': False,
+                'evidence':   False,
+                'blockchain': False,
+            },
+        }
+        socketio.emit('live_incident', payload)
+        print(f"🚨 live_incident emitted: {alert_type} from {ip} | risk={rs.final_score}/100")
+    except Exception as e:
+        print(f"⚠️  _build_live_incident_from_alert: {e}")
+
+
+def _build_live_incident_from_event(event: dict):
+    """Build and emit a live_incident payload from a unified security event."""
+    import socket as _socket
+    try:
+        from utils.geo_lookup import geolocate, format_geo_display, is_private_ip
+        from utils.risk_scorer import calculate_risk
+        from utils.incident_manager import create_incident
+
+        src    = event.get('source') or {}
+        proc   = event.get('process') or {}
+        atk    = event.get('attack') or {}
+        hp     = event.get('honeypot') or {}
+        ml     = event.get('ml') or {}
+        fobj   = event.get('file') or {}
+
+        ip         = src.get('ip', '')
+        severity   = event.get('severity', 'HIGH')
+        attack_type = atk.get('type') or event.get('event_type', 'UNKNOWN')
+        scenario_id = event.get('scenario_id')
+        hp_hit     = bool(hp.get('triggered'))
+
+        geo_raw     = geolocate(ip) if ip else {}
+        geo_display = format_geo_display(geo_raw) if geo_raw else {}
+
+        local_ip = '127.0.0.1'
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+
+        rs = calculate_risk(
+            ml_prediction    = ml.get('prediction') or (attack_type if 'RANSOM' in attack_type.upper() else None),
+            ml_confidence    = ml.get('confidence', 0),
+            honeypot_hit     = hp_hit,
+            honeypot_count   = 1 if hp_hit else 0,
+            network_alert    = attack_type if 'NETWORK' in (event.get('event_type','').upper()) else None,
+            network_severity = severity,
+            process_suspicious = bool(proc.get('name')),
+            process_risk     = severity,
+            correlated_signals = 3 if scenario_id else 1,
+        )
+
+        now = datetime.utcnow().isoformat()
+
+        incident = create_incident(
+            attack_type=attack_type,
+            title=event.get('description') or f'{attack_type} detected',
+            severity=severity,
+            scenario_id=scenario_id,
+            source_ip=ip,
+            source_port=src.get('port'),
+            dest_ip=local_ip,
+            protocol=src.get('protocol'),
+            process_name=proc.get('name'),
+            process_pid=proc.get('pid'),
+            file_name=fobj.get('name'),
+            honeypot_hit=hp_hit,
+            honeypot_resource=hp.get('resource'),
+            ml_prediction=ml.get('prediction'),
+            ml_confidence=ml.get('confidence', 0),
+            geo_info=geo_display,
+            initial_events=[{'time': now, 'event': event.get('event_type',''), 'description': event.get('description',''), 'severity': severity}],
+        )
+
+        payload = {
+            'incident_id':   incident.get('id'),
+            'attack_type':   attack_type,
+            'title':         incident.get('title'),
+            'severity':      severity,
+            'risk_score':    rs.final_score,
+            'risk_level':    rs.risk_level,
+            'description':   event.get('description', ''),
+            'timestamp':     now,
+            'scenario_id':   scenario_id,
+            'attacker': {
+                'ip':       ip,
+                'port':     src.get('port'),
+                'protocol': src.get('protocol'),
+                'mac':      'Not observable remotely' if ip and not is_private_ip(ip) else ('Unknown (local)' if ip else 'Unknown'),
+                'geo':      geo_display,
+            },
+            'target':        {'ip': local_ip, 'port': (event.get('destination') or {}).get('port')},
+            'process': {
+                'name':   proc.get('name'),
+                'pid':    proc.get('pid'),
+                'parent': proc.get('parent'),
+                'path':   proc.get('path'),
+            },
+            'file': {
+                'name':   fobj.get('name'),
+                'sha256': fobj.get('sha256'),
+            },
+            'honeypot': {
+                'triggered': hp_hit,
+                'resource':  hp.get('resource'),
+            },
+            'risk_factors':  rs.to_dict().get('factors', []),
+            'status': {
+                'detected':   True,
+                'honeypot':   hp_hit,
+                'ml':         bool(ml.get('prediction')),
+                'quarantine': False,
+                'evidence':   False,
+                'blockchain': False,
+            },
+        }
+        socketio.emit('live_incident', payload)
+    except Exception as e:
+        print(f"⚠️  _build_live_incident_from_event: {e}")
+
+
+# ═════════════════════════════════════════════════════════
+# STARTUP: Initialize new modules
+# ═════════════════════════════════════════════════════════
+
+def _init_new_modules():
+    """Initialize all new modules after app startup."""
+    try:
+        # Ensure new DB tables exist
+        from utils.db import init_db as _init_db
+        _init_db()
+    except Exception:
+        pass
+
+    try:
+        # Honeypot setup
+        from utils.honeypot import setup_honeypot, register_callback as hp_cb, load_persisted_triggers
+        setup_honeypot()
+        load_persisted_triggers()
+
+        def _on_hp_trigger(entry):
+            socketio.emit('honeypot_triggered', entry)
+            # Save to DB
+            try:
+                from utils.db import save_honeypot_trigger
+                save_honeypot_trigger(entry)
+            except Exception:
+                pass
+        hp_cb(_on_hp_trigger)
+    except Exception as e:
+        print(f"⚠️  Honeypot init failed: {e}")
+
+    try:
+        # Incident manager
+        from utils.incident_manager import init_incident_manager
+        init_incident_manager(socketio, blockchain_log)
+    except Exception as e:
+        print(f"⚠️  Incident manager init failed: {e}")
+
+    try:
+        # Attack director — register event callback
+        from utils.attack_director import register_output_callback, register_event_callback
+        from utils.db import save_security_event, save_sim_log
+
+        def _on_sim_output(entry):
+            socketio.emit('sim_log', entry)
+            if entry.get('scenario_id'):
+                try:
+                    save_sim_log(
+                        entry['scenario_id'],
+                        entry.get('message', ''),
+                        sim_type=entry.get('scenario_id', '').split('_')[0] if '_' in entry.get('scenario_id', '') else '',
+                    )
+                except Exception:
+                    pass
+
+        def _on_sim_event(event):
+            # Handle network alerts (already have type, ip, etc.)
+            if '_network_alert' in event:
+                alert = event['_network_alert']
+                socketio.emit('network_alert', alert)
+                # Also build a live_incident for sim network alerts
+                try:
+                    _build_live_incident_from_alert(alert, event.get('scenario_id'))
+                except Exception:
+                    pass
+                try:
+                    from utils.db import log_network_audit
+                    log_network_audit(
+                        event_type=alert.get('type', 'SIM'),
+                        ip=alert.get('ip', ''),
+                        severity=alert.get('severity', 'HIGH'),
+                        description=alert.get('description', ''),
+                        details=json.dumps({'scenario_id': event.get('scenario_id')}),
+                    )
+                except Exception:
+                    pass
+                return
+
+            # Save unified event
+            try:
+                save_security_event(event)
+            except Exception:
+                pass
+
+            # Emit to SOC
+            socketio.emit('security_event', event)
+            socketio.emit('soc_update', {
+                'type':        'security_event',
+                'event_type':  event.get('event_type', ''),
+                'severity':    event.get('severity', 'LOW'),
+                'description': event.get('description', ''),
+                'timestamp':   event.get('timestamp', ''),
+                'scenario_id': event.get('scenario_id', ''),
+            })
+
+            # Build and emit live_incident for CRITICAL/HIGH simulation events
+            if event.get('severity') in ('CRITICAL', 'HIGH'):
+                try:
+                    _build_live_incident_from_event(event)
+                except Exception:
+                    pass
+                socketio.emit('high_threat_alert', {
+                    'prediction':   event.get('attack', {}).get('type', event.get('event_type')),
+                    'threat_score': 85 if event.get('severity') == 'CRITICAL' else 75,
+                    'risk_level':   event.get('severity', 'HIGH'),
+                    'timestamp':    event.get('timestamp', ''),
+                    'scenario_id':  event.get('scenario_id', ''),
+                    'source_ip':    (event.get('source') or {}).get('ip', ''),
+                    'process_name': (event.get('process') or {}).get('name', ''),
+                    'event_type':   event.get('event_type', ''),
+                })
+
+            # Feed to threat correlator
+            try:
+                from utils.threat_correlator import ingest
+                ingest(event)
+            except Exception:
+                pass
+
+        register_output_callback(_on_sim_output)
+        register_event_callback(_on_sim_event)
+        print("✅ Attack director ready")
+
+    except Exception as e:
+        print(f"⚠️  Attack director init failed: {e}")
+
+    print("✅ CyberDefense-AI SOC Platform ready")
+    print(f"   ML       : ONLINE")
+    print(f"   Honeypot : ACTIVE")
+    print(f"   Lab Mode : READY")
+    print(f"   CLI      : python cyberdefense_cli.py")
+
+
+# Run after a short delay to let Flask/SocketIO boot
+threading.Timer(2.0, _init_new_modules).start()
 
 
 # ═════════════════════════════════════════════════════════
@@ -989,9 +1849,5 @@ def network_audit_log_route():
 # ═════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
-    import socket as _socket
-    _s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    _s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    _s.close()
     print("🛡️  CyberDefense Backend starting on http://localhost:5000")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)

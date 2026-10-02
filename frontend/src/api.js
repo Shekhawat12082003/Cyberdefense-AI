@@ -6,6 +6,7 @@ const getHeaders = () => ({
   Authorization: `Bearer ${localStorage.getItem('token')}`
 })
 
+// ── Existing API ──────────────────────────────────────────
 export const login    = (u, p) => axios.post(`${BASE}/login`, { username: u, password: p })
 export const getStats   = ()  => axios.get(`${BASE}/stats`,   { headers: getHeaders() })
 export const getThreats = ()  => axios.get(`${BASE}/threats`, { headers: getHeaders() })
@@ -37,3 +38,48 @@ export const exportThreatsCSV = () => {
       URL.revokeObjectURL(url)
     })
 }
+
+// ── New: Security Events ──────────────────────────────────
+export const getSecurityEvents = (params = {}) =>
+  axios.get(`${BASE}/events`, { params, headers: getHeaders() })
+
+// ── New: Incidents ────────────────────────────────────────
+export const getIncidents = (params = {}) =>
+  axios.get(`${BASE}/incidents`, { params, headers: getHeaders() })
+export const getIncident = (id) =>
+  axios.get(`${BASE}/incidents/${id}`, { headers: getHeaders() })
+export const investigateIncident = (id) =>
+  axios.get(`${BASE}/incidents/${id}/investigate`, { headers: getHeaders() })
+export const getIncidentEvidence = (id) =>
+  axios.get(`${BASE}/incidents/${id}/evidence`, { headers: getHeaders() })
+export const replayIncident = (id) =>
+  axios.get(`${BASE}/incidents/${id}/replay`, { headers: getHeaders() })
+export const getAttackGraph = (id) =>
+  axios.get(`${BASE}/incidents/${id}/attack-graph`, { headers: getHeaders() })
+
+// ── New: Honeypot ─────────────────────────────────────────
+export const getHoneypotFiles    = () => axios.get(`${BASE}/honeypot/files`,    { headers: getHeaders() })
+export const getHoneypotTriggers = () => axios.get(`${BASE}/honeypot/triggers`, { headers: getHeaders() })
+export const getHoneypotStatus   = () => axios.get(`${BASE}/honeypot/status`,   { headers: getHeaders() })
+
+// ── New: Geolocation ──────────────────────────────────────
+export const geolocateIP = (ip) =>
+  axios.get(`${BASE}/geo/${encodeURIComponent(ip)}`, { headers: getHeaders() })
+
+// ── New: Risk Score ───────────────────────────────────────
+export const calculateRiskScore = (data) =>
+  axios.post(`${BASE}/risk-score`, data, { headers: getHeaders() })
+
+// ── New: Cyber Lab ────────────────────────────────────────
+export const getLabMode   = ()       => axios.get(`${BASE}/lab/mode`,    { headers: getHeaders() })
+export const setLabMode   = (enabled) => axios.post(`${BASE}/lab/mode`, { enabled }, { headers: getHeaders() })
+export const getLabStatus = ()       => axios.get(`${BASE}/lab/status`,  { headers: getHeaders() })
+export const startSimulation = (type) => axios.post(`${BASE}/lab/simulate`, { type }, { headers: getHeaders() })
+export const stopSimulation  = ()    => axios.post(`${BASE}/lab/stop`,   {}, { headers: getHeaders() })
+export const resetLab        = ()    => axios.post(`${BASE}/lab/reset`,  {}, { headers: getHeaders() })
+export const getLabLogs = (scenarioId) =>
+  axios.get(`${BASE}/lab/logs/${scenarioId}`, { headers: getHeaders() })
+
+// ── New: Evidence ─────────────────────────────────────────
+export const getEvidence       = ()           => axios.get(`${BASE}/evidence`, { headers: getHeaders() })
+export const verifyEvidence    = (data)       => axios.post(`${BASE}/evidence/verify`, data, { headers: getHeaders() })

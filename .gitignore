@@ -6,8 +6,6 @@ __pycache__/
 venv/
 .env
 *.db
-*.pkl
-*.pth
 
 # Node
 node_modules/
@@ -20,16 +18,31 @@ blockchain/artifacts/
 blockchain/cache/
 blockchain/.env
 
-# Models (large files)
-backend/models/rf_model.pkl
-backend/models/dl_model.pth
-backend/models/scaler.pkl
+# Large model binary files (too big for GitHub)
+*.pkl
+*.pth
+*.pth.tar
 
-# Logs & quarantine
+# Allow JSON metadata and Python scorer files (small, needed)
+!backend/models/*.json
+!backend/models/*.py
+
+# Logs, quarantine, watched
 backend/blockchain_log.json
 backend/quarantine/
 backend/watched/
 backend/reports/
+backend/evidence/
+backend/lab/honeypot/
+backend/models/_dnn_best_checkpoint.pth
+
+# CLI token
+backend/.cli_token
+
+# Training datasets (too large for GitHub — download separately)
+notebooks/data/CICIDS2017/
+notebooks/data/CICIDS2018/
+notebooks/data/NSL-KDD/
 
 # OS
 .DS_Store

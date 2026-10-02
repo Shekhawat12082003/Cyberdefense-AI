@@ -1,0 +1,145 @@
+[
+  {
+    "event_id": "f3905eeaf32a4286",
+    "timestamp": "2026-09-30T08:32:07.173885",
+    "resource": "employee_data.xlsx",
+    "operation": "READ",
+    "process_name": "recon_tool_4zq1sx.exe",
+    "process_pid": 22676,
+    "source_ip": "192.168.5.166",
+    "scenario_id": "honeypot_hxny1cwn",
+    "triggered": true
+  },
+  {
+    "event_id": "7290bfa6c8d365e5",
+    "timestamp": "2026-09-30T08:32:07.502489",
+    "resource": "database_backup.sql",
+    "operation": "READ",
+    "process_name": "recon_tool_4zq1sx.exe",
+    "process_pid": 22676,
+    "source_ip": "192.168.5.166",
+    "scenario_id": "honeypot_hxny1cwn",
+    "triggered": true
+  },
+  {
+    "event_id": "84a41a124e0ab556",
+    "timestamp": "2026-09-30T08:32:07.847587",
+    "resource": "credentials.db",
+    "operation": "READ",
+    "process_name": "recon_tool_4zq1sx.exe",
+    "process_pid": 22676,
+    "source_ip": "192.168.5.166",
+    "scenario_id": "honeypot_hxny1cwn",
+    "triggered": true
+  },
+  {
+    "event_id": "720695c1a13552ae",
+    "timestamp": "2026-09-30T08:32:08.194865",
+    "resource": "backup.zip",
+    "operation": "READ",
+    "process_name": "recon_tool_4zq1sx.exe",
+    "process_pid": 22676,
+    "source_ip": "192.168.5.166",
+    "scenario_id": "honeypot_hxny1cwn",
+    "triggered": true
+  },
+  {
+    "event_id": "a3e3c06b9da26654",
+    "timestamp": "2026-09-30T08:33:17.231547",
+    "resource": "ssh_private_key.pem",
+    "operation": "READ",
+    "process_name": "ransomware_payload.exe",
+    "process_pid": 22676,
+    "source_ip": "192.168.2.193",
+    "scenario_id": "ransomware_gcoyiyfz",
+    "triggered": true
+  },
+  {
+    "event_id": "7ef59719d3ec01b3",
+    "timestamp": "2026-09-30T08:52:35.824480",
+    "resource": "employee_data.xlsx",
+    "operation": "READ",
+    "process_name": "recon_tool_jmx959.exe",
+    "process_pid": 30656,
+    "source_ip": "192.168.3.193",
+    "scenario_id": "honeypot_szymxda0",
+    "triggered": true
+  },
+  {
+    "event_id": "4b38b93c24f4e8da",
+    "timestamp": "2026-09-30T08:52:36.143073",
+    "resource": "ssh_private_key.pem",
+    "operation": "READ",
+    "process_name": "recon_tool_jmx959.exe",
+    "process_pid": 30656,
+    "source_ip": "192.168.3.193",
+    "scenario_id": "honeypot_szymxda0",
+    "triggered": true
+  },
+  {
+    "event_id": "5d46c7b620633cab",
+    "timestamp": "2026-10-01T05:39:08.167499",
+    "resource": "backup.zip",
+    "operation": "READ",
+    "process_name": "recon_tool_db6mr9.exe",
+    "process_pid": 28676,
+    "source_ip": "192.168.1.228",
+    "scenario_id": "honeypot_q1qamf6y",
+    "triggered": true
+  },
+  {
+    "event_id": "9e79607bf5a973de",
+    "timestamp": "2026-10-01T05:39:08.515812",
+    "resource": "database_backup.sql",
+    "operation": "READ",
+    "process_name": "recon_tool_db6mr9.exe",
+    "process_pid": 28676,
+    "source_ip": "192.168.1.228",
+    "scenario_id": "honeypot_q1qamf6y",
+    "triggered": true
+  },
+  {
+    "event_id": "414c6e0aa85e084f",
+    "timestamp": "2026-10-01T05:39:08.880629",
+    "resource": "employee_data.xlsx",
+    "operation": "READ",
+    "process_name": "recon_tool_db6mr9.exe",
+    "process_pid": 28676,
+    "source_ip": "192.168.1.228",
+    "scenario_id": "honeypot_q1qamf6y",
+    "triggered": true
+  },
+  {
+    "event_id": "b1478eac5bec6a26",
+    "timestamp": "2026-10-01T05:40:52.656733",
+    "resource": "financial_report_Q4.xlsx",
+    "operation": "READ",
+    "process_name": "recon_tool_2h4okc.exe",
+    "process_pid": 28676,
+    "source_ip": "192.168.2.183",
+    "scenario_id": "honeypot_6tthx0m2",
+    "triggered": true
+  },
+  {
+    "event_id": "6ce9a3b5b847dcc8",
+    "timestamp": "2026-10-01T05:40:53.006299",
+    "resource": "credentials.db",
+    "operation": "READ",
+    "process_name": "recon_tool_2h4okc.exe",
+    "process_pid": 28676,
+    "source_ip": "192.168.2.183",
+    "scenario_id": "honeypot_6tthx0m2",
+    "triggered": true
+  },
+  {
+    "event_id": "c2ebd79fe8dcfc7c",
+    "timestamp": "2026-10-01T05:40:53.351035",
+    "resource": "employee_data.xlsx",
+    "operation": "READ",
+    "process_name": "recon_tool_2h4okc.exe",
+    "process_pid": 28676,
+    "source_ip": "192.168.2.183",
+    "scenario_id": "honeypot_6tthx0m2",
+    "triggered": true
+  }
+]

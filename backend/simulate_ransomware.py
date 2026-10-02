@@ -3,12 +3,11 @@ import sys
 import time
 import struct
 import random
+import string
 
 # ── Config ────────────────────────────────────────────────
 WATCHED_DIR = os.path.join(os.path.dirname(__file__), 'watched')
 os.makedirs(WATCHED_DIR, exist_ok=True)
-
-XOR_KEY = b'RANSOMWARE_SIMULATOR_KEY_2024_CYBERDEFENSE'
 
 BANNER = """
 ╔══════════════════════════════════════════════════════╗
@@ -17,24 +16,80 @@ BANNER = """
 ╚══════════════════════════════════════════════════════╝
 """
 
-RANSOM_NOTE = """
+# ── Randomization helpers ─────────────────────────────────
+
+def rand_key() -> bytes:
+    """Random XOR key each run."""
+    length = random.randint(16, 64)
+    return bytes(random.randint(0, 255) for _ in range(length))
+
+def rand_btc_address() -> str:
+    chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+    return '1' + ''.join(random.choices(chars, k=random.randint(25, 33)))
+
+def rand_email() -> str:
+    domains = ['darkweb.onion', 'protonmail.com', 'tutanota.com', 'cock.li']
+    user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(6, 12)))
+    return f"{user}@{random.choice(domains)}"
+
+def rand_hours() -> int:
+    return random.choice([24, 48, 72, 96])
+
+def rand_btc_amount() -> float:
+    return round(random.uniform(0.1, 2.5), 2)
+
+def rand_ransom_note() -> str:
+    amount  = rand_btc_amount()
+    address = rand_btc_address()
+    email   = rand_email()
+    hours   = rand_hours()
+    id_     = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+    return f"""
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!          YOUR FILES ARE ENCRYPTED               !!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-All your important files have been encrypted.
+All your important files have been encrypted with AES-256.
 
-To recover your files send 0.5 BTC to:
-1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf Na
+YOUR UNIQUE ID: {id_}
 
-Contact: ransom@darkweb.onion
-You have 72 hours before deletion.
+To recover your files send {amount} BTC to:
+{address}
+
+Contact: {email}
+You have {hours} hours before permanent deletion.
 
 [THIS IS A SIMULATION - NOT REAL RANSOMWARE]
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 """
 
+def rand_content(label: str, size_range=(30, 80)) -> bytes:
+    """Generate random-length content with a label so each file differs."""
+    reps = random.randint(*size_range)
+    noise = ''.join(random.choices(string.ascii_letters + string.digits + ' ', k=random.randint(8, 24)))
+    return f'{label} {noise} '.encode() * reps
+
+def rand_filename(base: str, ext: str) -> str:
+    """Append a short random suffix so filenames differ each run."""
+    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{base}_{suffix}{ext}"
+
+def rand_delay(base: float) -> float:
+    """Jitter ±40% around base delay."""
+    return round(base * random.uniform(0.6, 1.4), 2)
+
+
+def generate_random_thresholds() -> dict:
+    """Generate random threat score thresholds (0-100 scale).
+    Returns: {'low_max': X, 'medium_max': Y} where LOW=0-X, MEDIUM=X-Y, HIGH=Y-100
+    """
+    low_max = round(random.uniform(20, 35), 1)      # LOW: 0 to 20-35
+    medium_max = round(random.uniform(65, 80), 1)   # MEDIUM: LOW to 65-80, HIGH: 65-80 to 100
+    return {'low_max': low_max, 'medium_max': medium_max}
+
+
+# ── Core helpers ──────────────────────────────────────────
 
 def xor_encrypt(data: bytes, key: bytes) -> bytes:
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
@@ -43,16 +98,20 @@ def xor_encrypt(data: bytes, key: bytes) -> bytes:
 def add_fake_pe_header(data: bytes, ransomware_mode: bool = True) -> bytes:
     mz           = b'MZ'
     pe           = b'PE\x00\x00'
-    machine      = struct.pack('<H', 0x014c)
-    num_sections = struct.pack('<H', 6 if ransomware_mode else 3)
-    dll_chars    = struct.pack('<H', 0x0000 if ransomware_mode else 0x8540)
-    stack_size   = struct.pack('<I', 262144 if ransomware_mode else 1048576)
-    btc_marker   = b'1BTC_RANSOM_PAY_NOW_' if ransomware_mode else b'\x00' * 20
+    machine      = struct.pack('<H', random.choice([0x014c, 0x8664, 0x01c0]))
+    num_sections = struct.pack('<H', random.randint(5, 9) if ransomware_mode else random.randint(2, 4))
+    dll_chars    = struct.pack('<H', random.choice([0x0000, 0x0002]) if ransomware_mode else 0x8540)
+    stack_size   = struct.pack('<I', random.choice([131072, 262144, 524288]) if ransomware_mode else random.choice([1048576, 2097152]))
+    # Random BTC-style marker for ransomware, random noise for benign
+    if ransomware_mode:
+        marker = f'1BTC_RANSOM_{rand_btc_address()[:8]}_'.encode()[:20]
+    else:
+        marker = bytes(random.randint(0, 255) for _ in range(20))
     header = (
         mz + b'\x00' * 58 +
         pe + machine + num_sections +
         b'\x00' * 12 + dll_chars +
-        stack_size + b'\x00' * 16 + btc_marker
+        stack_size + b'\x00' * 16 + marker
     )
     return header + data
 
@@ -60,7 +119,7 @@ def add_fake_pe_header(data: bytes, ransomware_mode: bool = True) -> bytes:
 def drop_ransom_note():
     path = os.path.join(WATCHED_DIR, 'READ_ME_NOW.txt')
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(RANSOM_NOTE)
+        f.write(rand_ransom_note())
     print(f"   📝 Ransom note dropped: READ_ME_NOW.txt")
 
 
@@ -88,14 +147,28 @@ def simulate_full_ransomware_attack(delay: float = 2.0):
     print(BANNER)
     print("🦠 FULL RANSOMWARE ATTACK SIMULATION")
     print("=" * 55)
+    
+    thresholds = generate_random_thresholds()
+    print(f"\n🎯 THREAT SCORE THRESHOLDS (Random):")
+    print(f"   🟢 LOW    : 0.0 — {thresholds['low_max']}")
+    print(f"   🟡 MEDIUM : {thresholds['low_max']} — {thresholds['medium_max']}")
+    print(f"   🔴 HIGH   : {thresholds['medium_max']} — 100.0\n")
 
-    test_files = [
-        ('document.txt',       b'Sensitive company data - employee records financial info'),
-        ('financial_data.csv', b'Name,Amount,Account\nJohn,50000,ACC001\nJane,75000,ACC002'),
-        ('config.json',        b'{"api_key": "secret123", "db_password": "admin456"}'),
-        ('backup.db',          b'SQLite format 3\x00' + b'Database records ' * 20),
-        ('secret_keys.pem',    b'-----BEGIN RSA PRIVATE KEY-----\nFAKE_KEY_DATA\n-----END RSA PRIVATE KEY-----'),
+    key = rand_key()
+
+    # Randomised file names and content each run
+    base_files = [
+        ('document',      '.txt', b'Sensitive company data employee records financial info '),
+        ('financial_data','.csv', b'Name,Amount,Account\nEmployee,'),
+        ('config',        '.json',b'{"api_key": "'),
+        ('backup',        '.db',  b'SQLite format 3\x00Database records '),
+        ('secret_keys',   '.pem', b'-----BEGIN RSA PRIVATE KEY-----\n'),
     ]
+    test_files = []
+    for base, ext, seed in base_files:
+        fname   = rand_filename(base, ext)
+        content = seed + rand_content(base, (20, 60))
+        test_files.append((fname, content))
 
     print("\n📁 PHASE 1: Creating target files...")
     created = []
@@ -106,8 +179,9 @@ def simulate_full_ransomware_attack(delay: float = 2.0):
         created.append(path)
         print(f"   📄 Created: {filename}")
 
-    print(f"   Waiting {delay}s before encryption...")
-    time.sleep(delay)
+    actual_delay = rand_delay(delay)
+    print(f"   Waiting {actual_delay}s before encryption...")
+    time.sleep(actual_delay)
 
     print("\n" + "=" * 55)
     print("🔒 PHASE 2: ENCRYPTING FILES...")
@@ -116,14 +190,14 @@ def simulate_full_ransomware_attack(delay: float = 2.0):
         try:
             with open(filepath, 'rb') as f:
                 data = f.read()
-            encrypted  = xor_encrypt(data, XOR_KEY)
-            final      = add_fake_pe_header(encrypted, ransomware_mode=True)
+            encrypted   = xor_encrypt(data, key)
+            final       = add_fake_pe_header(encrypted, ransomware_mode=True)
             locked_path = filepath + '.locked'
             with open(locked_path, 'wb') as f:
                 f.write(final)
             os.remove(filepath)
             print(f"   🔒 {filename} → {filename}.locked")
-            time.sleep(delay * 0.5)
+            time.sleep(rand_delay(delay * 0.5))
         except Exception as e:
             print(f"   ❌ Failed: {filename} — {e}")
 
@@ -142,30 +216,44 @@ def simulate_mixed_attack(delay: float = 1.5):
     print(BANNER)
     print("🎯 MIXED ATTACK SIMULATION — Best for Demo")
     print("=" * 55)
+    
+    thresholds = generate_random_thresholds()
+    print(f"\n🎯 THREAT SCORE THRESHOLDS (Random):")
+    print(f"   🟢 LOW    : 0.0 — {thresholds['low_max']}")
+    print(f"   🟡 MEDIUM : {thresholds['low_max']} — {thresholds['medium_max']}")
+    print(f"   🔴 HIGH   : {thresholds['medium_max']} — 100.0\n")
 
-    files = [
-        # HIGH threat — ransomware indicators
-        ('ransomware_payload.dll', True,  b'Malicious payload ' * 50,        'HIGH'),
-        ('encrypted_locker.exe',   True,  b'Encrypted locker data ' * 40,    'HIGH'),
-        ('crypto_miner.dll',       True,  b'Mining payload BTC wallet ' * 30,'HIGH'),
-        # MEDIUM threat — suspicious
-        ('suspicious_tool.exe',    False, b'Tool data medium risk ' * 40,     'MEDIUM'),
-        ('unknown_packer.dll',     False, b'Packed data unknown origin ' * 30,'MEDIUM'),
-        # LOW threat — benign
-        ('calc.dll',               False, b'Normal calculator application ' * 50, 'LOW'),
-        ('notepad_helper.dll',     False, b'Helper DLL safe content ' * 50,       'LOW'),
-    ]
+    key = rand_key()
+
+    high_bases   = ['ransomware_payload', 'encrypted_locker', 'crypto_miner', 'keylogger', 'wiper']
+    medium_bases = ['suspicious_tool', 'unknown_packer', 'obfuscated_loader', 'dropper_stage2']
+    low_bases    = ['calc', 'notepad_helper', 'ui_helper', 'font_renderer', 'audio_lib']
+
+    # Pick random subset each run
+    high_picks   = random.sample(high_bases,   k=random.randint(2, 3))
+    medium_picks = random.sample(medium_bases, k=random.randint(1, 2))
+    low_picks    = random.sample(low_bases,    k=random.randint(1, 2))
+
+    files = []
+    for b in high_picks:
+        ext = random.choice(['.dll', '.exe'])
+        files.append((rand_filename(b, ext), True,  rand_content(b, (40, 80)), 'HIGH'))
+    for b in medium_picks:
+        ext = random.choice(['.dll', '.exe'])
+        files.append((rand_filename(b, ext), False, rand_content(b, (30, 60)), 'MEDIUM'))
+    for b in low_picks:
+        files.append((rand_filename(b, '.dll'), False, rand_content(b, (40, 70)), 'LOW'))
+
+    random.shuffle(files)  # randomise drop order
 
     print(f"\n📁 Creating {len(files)} files (HIGH + MEDIUM + LOW)...\n")
 
     for filename, is_ransomware, content, level in files:
         filepath = os.path.join(WATCHED_DIR, filename)
         if is_ransomware:
-            encrypted = xor_encrypt(content, XOR_KEY)
+            encrypted = xor_encrypt(content, key)
             final     = add_fake_pe_header(encrypted, ransomware_mode=True)
         elif level == 'MEDIUM':
-            # Inject MEDIUM indicator so the file monitor applies the MEDIUM
-            # feature template instead of the benign baseline.
             marked = b'HEUR_SUSP_PACKED:' + content
             final  = add_fake_pe_header(marked, ransomware_mode=False)
         else:
@@ -176,7 +264,7 @@ def simulate_mixed_attack(delay: float = 1.5):
 
         icon = '🔴' if level == 'HIGH' else '🟡' if level == 'MEDIUM' else '🟢'
         print(f"   {icon} [{level}] {filename}")
-        time.sleep(delay)
+        time.sleep(rand_delay(delay))
 
     print(f"\n{'=' * 55}")
     print(f"🎯 MIXED ATTACK COMPLETE!")
@@ -192,21 +280,33 @@ def simulate_gradual_escalation(delay: float = 2.0):
     print(BANNER)
     print("📈 GRADUAL ESCALATION — APT Simulation")
     print("=" * 55)
+    
+    thresholds = generate_random_thresholds()
+    print(f"\n🎯 THREAT SCORE THRESHOLDS (Random):")
+    print(f"   🟢 LOW    : 0.0 — {thresholds['low_max']}")
+    print(f"   🟡 MEDIUM : {thresholds['low_max']} — {thresholds['medium_max']}")
+    print(f"   🔴 HIGH   : {thresholds['medium_max']} — 100.0\n")
 
-    stages = [
-        ('stage1_recon.dll',      False, b'Reconnaissance tool ' * 50,         'LOW',    "Stage 1: Reconnaissance"),
-        ('stage2_dropper.dll',    False, b'Dropper payload medium ' * 40,       'MEDIUM', "Stage 2: Dropper"),
-        ('stage3_persist.exe',    False, b'Persistence mechanism ' * 40,        'MEDIUM', "Stage 3: Persistence"),
-        ('stage4_encrypt.dll',    True,  b'Encryption engine BTC ' * 50,        'HIGH',   "Stage 4: Encryption"),
-        ('stage5_ransom.exe',     True,  b'Ransomware final payload ' * 50,     'HIGH',   "Stage 5: Ransom"),
+    key = rand_key()
+
+    stage_templates = [
+        ('recon',       False, 'LOW',    "Stage 1: Reconnaissance"),
+        ('dropper',     False, 'MEDIUM', "Stage 2: Dropper"),
+        ('persist',     False, 'MEDIUM', "Stage 3: Persistence"),
+        ('encrypt_eng', True,  'HIGH',   "Stage 4: Encryption Engine"),
+        ('ransom_final',True,  'HIGH',   "Stage 5: Ransom Payload"),
     ]
 
-    for filename, is_ransomware, content, level, stage_name in stages:
-        print(f"\n   ⏳ {stage_name}")
+    for i, (base, is_ransomware, level, stage_name) in enumerate(stage_templates, 1):
+        ext      = random.choice(['.dll', '.exe'])
+        filename = rand_filename(f"stage{i}_{base}", ext)
+        content  = rand_content(base, (40, 70))
         filepath = os.path.join(WATCHED_DIR, filename)
 
+        print(f"\n   ⏳ {stage_name}")
+
         if is_ransomware:
-            encrypted = xor_encrypt(content, XOR_KEY)
+            encrypted = xor_encrypt(content, key)
             final     = add_fake_pe_header(encrypted, ransomware_mode=True)
         elif level == 'MEDIUM':
             marked = b'HEUR_SUSP_PACKED:' + content
@@ -218,9 +318,10 @@ def simulate_gradual_escalation(delay: float = 2.0):
             f.write(final)
 
         icon = '🔴' if level == 'HIGH' else '🟡' if level == 'MEDIUM' else '🟢'
+        actual_delay = rand_delay(delay)
         print(f"   {icon} Deployed: {filename} [{level}]")
-        print(f"   Waiting {delay}s for next stage...")
-        time.sleep(delay)
+        print(f"   Waiting {actual_delay}s for next stage...")
+        time.sleep(actual_delay)
 
     drop_ransom_note()
 
@@ -235,23 +336,29 @@ def simulate_benign_files(count: int = 5):
     print(BANNER)
     print(f"✅ BENIGN FILES SIMULATION ({count} files)")
     print("=" * 55)
+    
+    thresholds = generate_random_thresholds()
+    print(f"\n🎯 THREAT SCORE THRESHOLDS (Random):")
+    print(f"   🟢 LOW    : 0.0 — {thresholds['low_max']}")
+    print(f"   🟡 MEDIUM : {thresholds['low_max']} — {thresholds['medium_max']}")
+    print(f"   🔴 HIGH   : {thresholds['medium_max']} — 100.0\n")
 
-    names = [
-        'system32_helper.dll', 'winapi_wrapper.dll',
-        'graphics_engine.dll', 'audio_driver.dll',
-        'network_utils.dll',   'ui_framework.dll',
-        'database_lib.dll',    'crypto_utils.dll',
+    name_pool = [
+        'system_helper', 'winapi_wrapper', 'graphics_engine', 'audio_driver',
+        'network_utils', 'ui_framework', 'database_lib', 'crypto_utils',
+        'font_renderer', 'input_handler', 'logger_lib', 'config_parser',
     ]
 
     for i in range(count):
-        filename = names[i % len(names)]
-        filepath = os.path.join(WATCHED_DIR, f"benign_{i+1}_{filename}")
-        content  = f'Normal application data safe content iteration {i} '.encode() * 50
+        base     = random.choice(name_pool)
+        filename = rand_filename(f"benign_{i+1}_{base}", '.dll')
+        filepath = os.path.join(WATCHED_DIR, filename)
+        content  = rand_content(f'Normal application data safe content {base}', (40, 70))
         final    = add_fake_pe_header(content, ransomware_mode=False)
         with open(filepath, 'wb') as f:
             f.write(final)
-        print(f"   ✅ Created: benign_{i+1}_{filename}")
-        time.sleep(1.0)
+        print(f"   ✅ Created: {filename}")
+        time.sleep(rand_delay(1.0))
 
     print(f"\n   Monitor should score ALL files LOW risk")
     print(f"   No quarantine should trigger\n")
@@ -259,25 +366,38 @@ def simulate_benign_files(count: int = 5):
 
 def quick_single_file():
     """Create one file with chosen risk level."""
-    print("\n  Risk level:")
+    thresholds = generate_random_thresholds()
+    print(f"\n🎯 THREAT SCORE THRESHOLDS (Random):")
+    print(f"   🟢 LOW    : 0.0 — {thresholds['low_max']}")
+    print(f"   🟡 MEDIUM : {thresholds['low_max']} — {thresholds['medium_max']}")
+    print(f"   🔴 HIGH   : {thresholds['medium_max']} — 100.0\n")
+    
+    print("  Risk level:")
     print("  1 — HIGH (ransomware)")
     print("  2 — MEDIUM (suspicious)")
     print("  3 — LOW (benign)")
     choice = input("  Choose: ").strip()
 
+    key = rand_key()
+    ts  = int(time.time())
+
     if choice == '1':
-        filename = f"malware_{int(time.time())}.dll"
-        content  = xor_encrypt(b'Ransomware payload BTC address ' * 100, XOR_KEY)
-        final    = add_fake_pe_header(content, ransomware_mode=True)
+        base     = random.choice(['malware', 'payload', 'locker', 'cryptor', 'wiper'])
+        filename = rand_filename(base, random.choice(['.dll', '.exe']))
+        content  = rand_content('Ransomware payload BTC address', (80, 120))
+        encrypted = xor_encrypt(content, key)
+        final    = add_fake_pe_header(encrypted, ransomware_mode=True)
         level    = 'HIGH'
     elif choice == '2':
-        filename = f"suspicious_{int(time.time())}.dll"
-        content  = b'Suspicious tool data unknown origin medium risk ' * 60
-        final    = add_fake_pe_header(content, ransomware_mode=False)
+        base     = random.choice(['suspicious', 'packed', 'obfuscated', 'dropper'])
+        filename = rand_filename(base, random.choice(['.dll', '.exe']))
+        content  = rand_content('Suspicious tool data unknown origin medium risk', (50, 80))
+        final    = add_fake_pe_header(b'HEUR_SUSP_PACKED:' + content, ransomware_mode=False)
         level    = 'MEDIUM'
     else:
-        filename = f"benign_{int(time.time())}.dll"
-        content  = b'Normal safe application data benign content ' * 60
+        base     = random.choice(['helper', 'util', 'lib', 'module', 'plugin'])
+        filename = rand_filename(base, '.dll')
+        content  = rand_content('Normal safe application data benign content', (50, 80))
         final    = add_fake_pe_header(content, ransomware_mode=False)
         level    = 'LOW'
 
@@ -304,7 +424,6 @@ def show_menu():
 
 
 if __name__ == '__main__':
-    # CLI args
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         if arg == 'attack':
@@ -321,7 +440,6 @@ if __name__ == '__main__':
             clean_watched_folder()
         sys.exit(0)
 
-    # Interactive menu
     while True:
         choice = show_menu()
 

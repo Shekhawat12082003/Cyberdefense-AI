@@ -94,6 +94,8 @@ export default function Network() {
     }
   }, []) // eslint-disable-line
 
+  const [liveIncident, setLiveIncident] = useState(null)
+
   useEffect(() => {
     if (!token) { navigate('/'); return }
     fetchAll()
@@ -115,6 +117,17 @@ export default function Network() {
     })
     socket.on('network_alert', (data) => setLiveAlerts(p => [data, ...p].slice(0, 50)))
     socket.on('network_audit_event', (data) => setNetAuditLogs(p => [data, ...p].slice(0, 500)))
+    // Live incident from real attack or simulation
+    socket.on('live_incident', (data) => {
+      setLiveIncident(data)
+      setLiveAlerts(p => [{
+        timestamp: data.timestamp,
+        type:      data.attack_type,
+        ip:        (data.attacker || {}).ip || '',
+        severity:  data.severity,
+        description: data.description,
+      }, ...p].slice(0, 50))
+    })
     return () => { clearInterval(interval); socket.disconnect() }
   }, []) // eslint-disable-line
 
@@ -260,6 +273,230 @@ export default function Network() {
       </div>
 
       <div style={{ padding: '20px 28px', maxWidth: 1500, margin: '0 auto' }}>
+
+        {/* ── Capture mode + local IP banner ────────── */}
+        <div style={{
+          background: stats.capture_mode === 'scapy' ? '#001a00' : '#1a0a00',
+          border: `1px solid ${stats.capture_mode === 'scapy' ? '#00ff8844' : '#ff8c0044'}`,
+          borderRadius: 8, padding: '8px 16px', marginBottom: 14,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          flexWrap: 'wrap', gap: 8,
+        }}>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{
+              fontFamily: 'monospace', fontSize: 10,
+              color: stats.capture_mode === 'scapy' ? '#00ff88' : '#ff8c00',
+              letterSpacing: 2,
+            }}>
+              {stats.capture_mode === 'scapy' ? '📦 FULL PACKET CAPTURE (Scapy)' : '🔗 CONNECTION MODE (psutil) — Run as Admin for full capture'}
+            </span>
+            {stats.local_ip && (
+              <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#00d4ff', letterSpacing: 1 }}>
+                Monitoring: <strong>{stats.local_ip}</strong>
+              </span>
+            )}
+            {stats.scans_detected > 0 && (
+              <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#ff003c', letterSpacing: 1 }}>
+                🔍 {stats.scans_detected} scans detected
+              </span>
+            )}
+            {stats.brute_force_detected > 0 && (
+              <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#ff8c00', letterSpacing: 1 }}>
+                🔑 {stats.brute_force_detected} brute forces
+              </span>
+            )}
+          </div>
+          <span style={{ fontFamily: 'monospace', fontSize: 9, color: '#333' }}>
+            {stats.packets_captured > 0 ? `${stats.packets_captured.toLocaleString()} packets` : ''}
+          </span>
+        </div>
+
+        {/* ── LIVE INCIDENT CARD ──────────────────────── */}
+        {liveIncident && (
+          <div style={{
+            background: 'rgba(0,0,8,0.98)',
+            border: `2px solid ${{ CRITICAL: '#ff003c', HIGH: '#ff8c00', MEDIUM: '#ffe600' }[liveIncident.severity] || '#ff003c'}`,
+            borderRadius: 12, marginBottom: 16, overflow: 'hidden',
+            boxShadow: `0 0 40px ${{ CRITICAL: '#ff003c', HIGH: '#ff8c00' }[liveIncident.severity] || '#ff003c'}33`,
+            animation: 'incidentIn 0.3s ease-out',
+          }}>
+            {/* Header */}
+            <div style={{
+              background: `${{ CRITICAL: '#ff003c', HIGH: '#ff8c00' }[liveIncident.severity] || '#ff003c'}22`,
+              borderBottom: `1px solid ${{ CRITICAL: '#ff003c', HIGH: '#ff8c00' }[liveIncident.severity] || '#ff003c'}44`,
+              padding: '10px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ff003c',
+                  display: 'inline-block', boxShadow: '0 0 10px #ff003c', animation: 'pulse 0.8s infinite' }} />
+                <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#fff', fontWeight: 700, letterSpacing: 3 }}>
+                  🚨 LIVE ATTACK — {(liveIncident.attack_type || '').replace(/_/g, ' ')}
+                </span>
+                <span style={{
+                  padding: '2px 10px', borderRadius: 3, fontFamily: 'monospace', fontSize: 10, fontWeight: 700, letterSpacing: 2,
+                  background: `${{ CRITICAL: '#ff003c', HIGH: '#ff8c00' }[liveIncident.severity] || '#ff003c'}33`,
+                  color: `${{ CRITICAL: '#ff003c', HIGH: '#ff8c00', MEDIUM: '#ffe600' }[liveIncident.severity] || '#ff003c'}`,
+                  border: `1px solid ${{ CRITICAL: '#ff003c', HIGH: '#ff8c00' }[liveIncident.severity] || '#ff003c'}`,
+                }}>{liveIncident.severity}</span>
+              </div>
+              <button onClick={() => setLiveIncident(null)} style={{
+                background: 'transparent', border: '1px solid #333', borderRadius: 4,
+                color: '#555', cursor: 'pointer', padding: '3px 8px', fontFamily: 'monospace', fontSize: 10,
+              }}>✕</button>
+            </div>
+
+            {/* Content */}
+            <div style={{ padding: 20, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 200px', gap: 20, fontFamily: 'monospace' }}>
+
+              {/* Attacker */}
+              <div>
+                <div style={{ fontSize: 9, color: '#444', letterSpacing: 3, marginBottom: 10 }}>ATTACKER</div>
+                {[
+                  ['Source IP',    (liveIncident.attacker || {}).ip || 'Unknown'],
+                  ['MAC',          (liveIncident.attacker || {}).mac || 'Unknown'],
+                  ['Protocol',     (liveIncident.attacker || {}).protocol || 'TCP'],
+                  ['Target IP',    (liveIncident.target || {}).ip || 'Unknown'],
+                  ['Target Port',  (liveIncident.target || {}).port || (liveIncident.network || {}).target_port || '—'],
+                ].map(([k, v]) => (
+                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5, borderBottom: '1px solid #0d0d0d', paddingBottom: 3 }}>
+                    <span style={{ fontSize: 10, color: '#555' }}>{k}</span>
+                    <span style={{ fontSize: 10, color: k === 'Source IP' ? '#ff003c' : '#ccc', fontWeight: k === 'Source IP' ? 700 : 400 }}>{v}</span>
+                  </div>
+                ))}
+                {/* Geo */}
+                {(() => {
+                  const geo = (liveIncident.attacker || {}).geo || {}
+                  return (
+                    <div style={{ marginTop: 8, padding: '6px 8px', background: '#080818', border: '1px solid #111', borderRadius: 4 }}>
+                      <div style={{ fontSize: 9, color: '#333', letterSpacing: 2, marginBottom: 3 }}>📍 LOCATION</div>
+                      {geo.type === 'private' ? (
+                        <div style={{ fontSize: 11, color: '#00d4ff' }}>LOCAL NETWORK</div>
+                      ) : geo.type === 'approximate' ? (
+                        <>
+                          <div style={{ fontSize: 12, color: '#00d4ff', fontWeight: 700 }}>{geo.city}, {geo.country}</div>
+                          <div style={{ fontSize: 9, color: '#555', marginTop: 2 }}>{geo.isp}</div>
+                          <div style={{ fontSize: 9, color: '#555' }}>{geo.asn}</div>
+                          <div style={{ fontSize: 8, color: '#222', marginTop: 3 }}>⚠ APPROXIMATE</div>
+                        </>
+                      ) : (
+                        <div style={{ fontSize: 10, color: '#444' }}>Unknown</div>
+                      )}
+                    </div>
+                  )
+                })()}
+              </div>
+
+              {/* Attack details */}
+              <div>
+                <div style={{ fontSize: 9, color: '#444', letterSpacing: 3, marginBottom: 10 }}>ATTACK DETAILS</div>
+                {(() => {
+                  const net = liveIncident.network || {}
+                  const mitre = liveIncident.mitre || {}
+                  return [
+                    ['Type',       (liveIncident.attack_type || '').replace(/_/g, ' ')],
+                    ['MITRE',      mitre.id ? `${mitre.id}` : '—'],
+                    ['Technique',  mitre.name || '—'],
+                    ['Ports Hit',  net.port_count || net.ports_hit?.length || '—'],
+                    ['Service',    net.service || '—'],
+                    ['Conns',      net.connection_count || '—'],
+                    ['Capture',    net.capture_mode || 'psutil'],
+                  ].map(([k, v]) => (
+                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5, borderBottom: '1px solid #0d0d0d', paddingBottom: 3 }}>
+                      <span style={{ fontSize: 10, color: '#555' }}>{k}</span>
+                      <span style={{ fontSize: 10, color: '#ccc' }}>{v}</span>
+                    </div>
+                  ))
+                })()}
+                {/* Ports scanned list */}
+                {(liveIncident.network || {}).ports_hit?.length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    <div style={{ fontSize: 9, color: '#333', letterSpacing: 2, marginBottom: 4 }}>PORTS SCANNED</div>
+                    <div style={{ maxHeight: 50, overflowY: 'auto' }}>
+                      {(liveIncident.network.ports_hit || []).slice(0, 40).map(p => (
+                        <span key={p} style={{ display: 'inline-block', margin: '2px 2px', padding: '1px 5px',
+                          background: '#0a0a1a', border: '1px solid #1a1a2e', borderRadius: 2, fontSize: 8, color: '#555' }}>
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Risk */}
+              <div>
+                <div style={{ fontSize: 9, color: '#444', letterSpacing: 3, marginBottom: 10 }}>RISK ASSESSMENT</div>
+                <div style={{ textAlign: 'center', marginBottom: 12 }}>
+                  <div style={{
+                    fontSize: 52, fontWeight: 700, lineHeight: 1,
+                    color: liveIncident.risk_score >= 76 ? '#ff003c' : liveIncident.risk_score >= 51 ? '#ff8c00' : '#ffe600',
+                    textShadow: `0 0 20px ${liveIncident.risk_score >= 76 ? '#ff003c' : '#ff8c00'}66`,
+                  }}>{Math.round(liveIncident.risk_score || 0)}</div>
+                  <div style={{ fontSize: 9, color: '#444', letterSpacing: 3, marginTop: 3 }}>/ 100</div>
+                  <div style={{
+                    display: 'inline-block', marginTop: 6, padding: '3px 12px', borderRadius: 4,
+                    background: `${liveIncident.risk_score >= 76 ? '#ff003c' : '#ff8c00'}22`,
+                    border: `1px solid ${liveIncident.risk_score >= 76 ? '#ff003c' : '#ff8c00'}`,
+                    fontSize: 10, color: liveIncident.risk_score >= 76 ? '#ff003c' : '#ff8c00',
+                    fontWeight: 700, letterSpacing: 2,
+                  }}>{liveIncident.risk_level || 'HIGH'}</div>
+                </div>
+                {(liveIncident.risk_factors || []).slice(0, 4).map((f, i) => (
+                  <div key={i} style={{ marginBottom: 5 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                      <span style={{ fontSize: 9, color: '#444' }}>{f.name}</span>
+                      <span style={{ fontSize: 9, color: '#00d4ff', fontWeight: 700 }}>+{(f.contribution || 0).toFixed(1)}</span>
+                    </div>
+                    <div style={{ height: 3, background: '#111', borderRadius: 2 }}>
+                      <div style={{ width: `${Math.min(((f.contribution||0)/(f.weight||25))*100, 100)}%`, height: '100%', background: '#00d4ff', borderRadius: 2 }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Actions */}
+              <div>
+                <div style={{ fontSize: 9, color: '#444', letterSpacing: 3, marginBottom: 10 }}>RESPONSE</div>
+                {/* Status badges */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 12 }}>
+                  {[
+                    ['DETECTED',   true,  '#00ff88'],
+                    ['HONEYPOT',   (liveIncident.status || {}).honeypot, '#ff003c'],
+                    ['ML ENGINE',  (liveIncident.status || {}).ml,       '#00d4ff'],
+                    ['QUARANTINE', (liveIncident.status || {}).quarantine,'#ff8c00'],
+                    ['EVIDENCE',   (liveIncident.status || {}).evidence,  '#a78bfa'],
+                    ['BLOCKCHAIN', (liveIncident.status || {}).blockchain,'#00d4ff'],
+                  ].map(([label, active, col]) => (
+                    <div key={label} style={{
+                      padding: '4px 6px', borderRadius: 3, textAlign: 'center',
+                      background: active ? `${col}22` : '#0a0a0a',
+                      border: `1px solid ${active ? col + '66' : '#111'}`,
+                    }}>
+                      <div style={{ fontSize: 8, color: active ? col : '#222', letterSpacing: 1 }}>{label}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* Buttons */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {liveIncident.incident_id && (
+                    <button onClick={() => navigate(`/incidents/${liveIncident.incident_id}`)} style={{
+                      padding: '6px', fontSize: 8, letterSpacing: 2, fontFamily: 'monospace',
+                      background: '#ff003c11', border: '1px solid #ff003c', borderRadius: 3, color: '#ff003c', cursor: 'pointer',
+                    }}>📋 VIEW INCIDENT</button>
+                  )}
+                  <button onClick={() => navigate('/incidents')} style={{
+                    padding: '6px', fontSize: 8, letterSpacing: 2, fontFamily: 'monospace',
+                    background: '#ff8c0011', border: '1px solid #ff8c00', borderRadius: 3, color: '#ff8c00', cursor: 'pointer',
+                  }}>🚨 ALL INCIDENTS</button>
+                  <button onClick={() => navigate('/')} style={{
+                    padding: '6px', fontSize: 8, letterSpacing: 2, fontFamily: 'monospace',
+                    background: '#00d4ff11', border: '1px solid #00d4ff', borderRadius: 3, color: '#00d4ff', cursor: 'pointer',
+                  }}>🏠 DASHBOARD</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Stat cards */}
         <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
@@ -731,6 +968,7 @@ export default function Network() {
 
       <style>{`
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        @keyframes incidentIn { from{opacity:0;transform:translateY(-10px)} to{opacity:1;transform:translateY(0)} }
         ::-webkit-scrollbar{width:5px;height:5px}
         ::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:#222;border-radius:3px}
