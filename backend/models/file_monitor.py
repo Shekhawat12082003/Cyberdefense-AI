@@ -283,6 +283,23 @@ def quarantine_file(filepath, result):
         os.rename(filepath, dest)
         print(f"   🔒 QUARANTINED: {filename}")
 
+        # ── VirusTotal hash check ──────────────────────
+        vt_result = {}
+        try:
+            import hashlib
+            with open(dest, 'rb') as _f:
+                sha256 = hashlib.sha256(_f.read()).hexdigest()
+            from utils.threat_intel import check_virustotal_hash, get_enrichment_status
+            if get_enrichment_status().get('virustotal', {}).get('configured'):
+                vt_result = check_virustotal_hash(sha256)
+                if vt_result.get('available'):
+                    det = vt_result.get('malicious', 0)
+                    total = vt_result.get('total_engines', 0)
+                    name  = vt_result.get('popular_name', '')
+                    print(f"   🦠 VirusTotal: {det}/{total} engines | {name or 'Unknown'} | {vt_result.get('verdict','?')}")
+        except Exception as vte:
+            print(f"   ℹ️  VT check skipped: {vte}")
+
         log_path = os.path.join(QUARANTINE, 'quarantine_log.json')
         logs     = []
         if os.path.exists(log_path):
@@ -296,7 +313,8 @@ def quarantine_file(filepath, result):
             'quarantined': dest,
             'score':       result.get('threat_score'),
             'prediction':  result.get('prediction'),
-            'timestamp':   datetime.now().isoformat()
+            'timestamp':   datetime.now().isoformat(),
+            'virustotal':  vt_result,
         })
         with open(log_path, 'w') as f:
             json.dump(logs, f, indent=2)

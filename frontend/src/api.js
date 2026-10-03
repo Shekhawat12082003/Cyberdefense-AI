@@ -83,3 +83,10 @@ export const getLabLogs = (scenarioId) =>
 // ── New: Evidence ─────────────────────────────────────────
 export const getEvidence       = ()           => axios.get(`${BASE}/evidence`, { headers: getHeaders() })
 export const verifyEvidence    = (data)       => axios.post(`${BASE}/evidence/verify`, data, { headers: getHeaders() })
+
+// ── New: Threat Intelligence ──────────────────────────────
+export const getIntelStatus    = ()     => axios.get(`${BASE}/intel/status`,          { headers: getHeaders() })
+export const enrichIP          = (ip)   => axios.get(`${BASE}/intel/ip/${encodeURIComponent(ip)}`,         { headers: getHeaders() })
+export const checkAbuseIPDB    = (ip)   => axios.get(`${BASE}/intel/ip/${encodeURIComponent(ip)}/abuse`,   { headers: getHeaders() })
+export const checkShodan       = (ip)   => axios.get(`${BASE}/intel/ip/${encodeURIComponent(ip)}/shodan`,  { headers: getHeaders() })
+export const checkVirusTotal   = (hash) => axios.get(`${BASE}/intel/hash/${hash}`,    { headers: getHeaders() })

@@ -6,6 +6,7 @@ import {
   getLabStatus, getSecurityEvents
 } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import ThreatIntelPanel from '../components/ThreatIntelPanel'
 
 // ── Design tokens ──────────────────────────────────────────
 const C = {
@@ -330,6 +331,16 @@ function LiveIncidentCard({ incident, onDismiss, navigate }) {
           {network.ports_hit.length > 30 && (
             <span style={m(9, C.muted)}> +{network.ports_hit.length - 30} more</span>
           )}
+        </div>
+      )}
+
+      {/* ── Threat Intelligence ─────────────────────── */}
+      {attacker.ip && (
+        <div style={{ borderTop: '1px solid #111', padding: '14px 20px', background: '#030308' }}>
+          <ThreatIntelPanel
+            ip={attacker.ip}
+            inlineData={incident.threat_intel}
+          />
         </div>
       )}
     </div>

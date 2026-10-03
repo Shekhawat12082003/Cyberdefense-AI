@@ -1482,6 +1482,61 @@ def lab_scenarios():
 
 
 # ═════════════════════════════════════════════════════════
+# THREAT INTELLIGENCE (AbuseIPDB + Shodan + VirusTotal)
+# ═════════════════════════════════════════════════════════
+
+@app.route('/api/intel/ip/<path:ip>', methods=['GET'])
+def intel_ip(ip):
+    """Full IP enrichment — AbuseIPDB + Shodan."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.threat_intel import enrich_ip
+    result = enrich_ip(ip, background=False)
+    return jsonify(result)
+
+
+@app.route('/api/intel/ip/<path:ip>/abuse', methods=['GET'])
+def intel_ip_abuse(ip):
+    """AbuseIPDB check only."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.threat_intel import check_abuseipdb
+    return jsonify(check_abuseipdb(ip))
+
+
+@app.route('/api/intel/ip/<path:ip>/shodan', methods=['GET'])
+def intel_ip_shodan(ip):
+    """Shodan host lookup only."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.threat_intel import check_shodan
+    return jsonify(check_shodan(ip))
+
+
+@app.route('/api/intel/hash/<file_hash>', methods=['GET'])
+def intel_hash(file_hash):
+    """VirusTotal file hash check."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.threat_intel import check_virustotal_hash
+    return jsonify(check_virustotal_hash(file_hash))
+
+
+@app.route('/api/intel/status', methods=['GET'])
+def intel_status():
+    """Which threat intel APIs are configured."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from utils.threat_intel import get_enrichment_status
+    return jsonify(get_enrichment_status())
+
+
+# ═════════════════════════════════════════════════════════
 # NETWORK AUDIT LOG (existing api.js references this)
 # ═════════════════════════════════════════════════════════
 
@@ -1510,6 +1565,18 @@ def _build_live_incident_from_alert(alert: dict, scenario_id: str = None):
 
         geo_raw     = geolocate(ip) if ip else {}
         geo_display = format_geo_display(geo_raw) if geo_raw else {}
+
+        # ── Threat Intelligence enrichment ──────────────
+        threat_intel = {}
+        try:
+            from utils.threat_intel import enrich_ip, get_enrichment_status
+            if get_enrichment_status().get('any_active') and ip and not is_private_ip(ip):
+                threat_intel = enrich_ip(ip, background=False)
+                abuse_score = threat_intel.get('abuseipdb', {}).get('abuse_score', 0)
+                shodan_ports = threat_intel.get('shodan', {}).get('port_count', 0)
+                print(f"🔍 Intel: {ip} → Abuse={abuse_score}% Shodan={shodan_ports} ports CVEs={threat_intel.get('shodan',{}).get('cve_count',0)}")
+        except Exception as te:
+            print(f"ℹ️  Threat intel skipped: {te}")
 
         local_ip = '127.0.0.1'
         try:
@@ -1568,6 +1635,7 @@ def _build_live_incident_from_alert(alert: dict, scenario_id: str = None):
                 'mac':      'Not observable remotely' if not is_private_ip(ip) else 'Unknown (local)',
                 'geo':      geo_display,
             },
+            'threat_intel':  threat_intel,
             'target':        {'ip': local_ip, 'port': dest_port},
             'network': {
                 'ports_hit':        alert.get('ports_hit', []),

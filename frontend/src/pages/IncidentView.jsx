@@ -4,6 +4,7 @@ import {
   getIncident, investigateIncident, getIncidentEvidence,
   replayIncident, getAttackGraph, geolocateIP
 } from '../api'
+import ThreatIntelPanel from '../components/ThreatIntelPanel'
 
 const mono = (sz = 13, c = '#fff') => ({ fontFamily: 'monospace', fontSize: sz, color: c })
 const card = (border = '#00d4ff22') => ({
@@ -353,6 +354,12 @@ export default function IncidentView() {
               </div>
             )}
           </div>
+
+          {/* Threat Intelligence — AbuseIPDB + Shodan */}
+          <ThreatIntelPanel
+            ip={incident.source_ip}
+            fileHash={incident.file_sha256}
+          />
         </div>
       )}
 
