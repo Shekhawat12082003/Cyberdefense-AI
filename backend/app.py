@@ -1263,11 +1263,14 @@ def honeypot_status():
     user = verify_token(request)
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
-    from utils.honeypot import get_trigger_count, get_honeypot_files
+    from utils.honeypot import get_trigger_count, get_honeypot_files, get_watcher_status
+    ws = get_watcher_status()
     return jsonify({
-        'active':        True,
-        'file_count':    len(get_honeypot_files()),
-        'trigger_count': get_trigger_count(),
+        'active':        ws['active'],
+        'watcher':       ws['active'],
+        'directory':     ws['directory'],
+        'file_count':    ws['file_count'],
+        'trigger_count': ws['trigger_count'],
     })
 
 
@@ -1789,10 +1792,11 @@ def _init_new_modules():
         pass
 
     try:
-        # Honeypot setup
-        from utils.honeypot import setup_honeypot, register_callback as hp_cb, load_persisted_triggers
+        # Honeypot setup + active filesystem watcher
+        from utils.honeypot import setup_honeypot, register_callback as hp_cb, load_persisted_triggers, start_honeypot_watcher
         setup_honeypot()
         load_persisted_triggers()
+        start_honeypot_watcher()   # ← ACTIVE watcher — detects real file access
 
         def _on_hp_trigger(entry):
             socketio.emit('honeypot_triggered', entry)

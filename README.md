@@ -1,345 +1,242 @@
-# CyberDefense AI Platform
+# 🛡️ CyberDefense-AI — AI-Powered SOC Platform
 
-> AI-powered ransomware detection with real blockchain logging, built for a hackathon & portfolio.
+> A full-stack Security Operations Center built from scratch — real-time network attack detection, ML-powered classification, honeypot traps, threat intelligence enrichment, incident response automation, and a live cyber range for attack simulations.
 
 **Developer:** Gagandeep Singh ([@Shekhawat12082003](https://github.com/Shekhawat12082003))
 
 ---
 
-## Table of Contents
+## What This Project Does
 
-- [Overview](#overview)
-- [Tech Stack](#tech-stack)
-- [Architecture](#architecture)
-- [Features](#features)
-- [Machine Learning Pipeline](#machine-learning-pipeline)
-- [Blockchain Integration](#blockchain-integration)
-- [Project Structure](#project-structure)
-- [Setup & Installation](#setup--installation)
-- [Usage](#usage)
-- [API Reference](#api-reference)
-- [Demo Credentials](#demo-credentials)
-- [URLs](#urls)
-- [Build History](#build-history)
+This started as a ransomware detector and evolved into a complete SOC platform. Here's everything that's been built:
 
 ---
 
-## Overview
+### 🦠 Ransomware & Malware Detection (v1)
 
-CyberDefense AI Platform is a full-stack cybersecurity platform that combines:
+The original core — a dual ML ensemble trained on 62,485 PE files:
 
-- **Dual AI models** (Random Forest + PyTorch DNN) for real-time ransomware detection
-- **Real blockchain logging** on Core Testnet2 — every high-severity threat is immutably recorded
-- **Auto-quarantine** — files scoring above threshold are isolated, analysts notified instantly
-- **Fullscreen SOC war room** — cinematic dashboard for live threat monitoring
-- **6-mode ransomware simulator** — for safe, controlled demos
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Backend | Python 3, Flask, Flask-SocketIO, JWT |
-| ML Models | Scikit-learn (Random Forest), PyTorch (DNN), SHAP |
-| Database | SQLite |
-| Blockchain | Solidity, Hardhat, Web3.py, Core Testnet2 |
-| Frontend | React 18, Vite, Tailwind CSS |
-| File Monitor | Watchdog |
-| Email Alerts | Gmail SMTP |
-| Reports | ReportLab (PDF) |
+- **Random Forest** (99.62% accuracy) + **PyTorch DNN** (98.30% accuracy)
+- Extracts 15 PE header features: `Machine`, `DebugSize`, `DllCharacteristics`, `BitcoinAddresses`, etc.
+- SHAP explainability — every prediction shows which features drove the decision
+- Auto-quarantine: files scoring above threshold are moved, XOR-encrypted, logged
+- Blockchain logging: every HIGH threat gets a SHA-256 hash recorded on **Core Testnet2** (Chain ID 1114) — tamper-proof, verifiable
+- File monitor watches `backend/watched/` with Watchdog — scans any dropped `.exe/.dll/.sys` automatically
+- PDF incident reports generated with ReportLab
+- Email alerts via Gmail SMTP when a HIGH threat is detected
 
 ---
 
-## Architecture
+### 🌐 Real-Time Network Intrusion Detection (v2)
 
+The platform now monitors ALL network traffic hitting your machine and detects attacks from other devices:
+
+- **8 detection engines**: Port Scan, Brute Force, SYN Flood, NULL Scan, XMAS Scan, FIN Scan, C2 Beacon, Data Exfiltration
+- **Raw socket capture** (Windows) — catches nmap probes, rejected SYNs, stealth scans without needing Wireshark
+- **Scapy sniffer** (when run as Administrator) — full packet-level capture
+- **psutil fallback** — established connections when packet capture unavailable
+- When an attack hits: automatically geolocates the attacker IP, calculates risk score, creates an incident, emits `live_incident` to the dashboard via WebSocket — all within seconds
+
+**Network IDS ML Models** trained on CICIDS2017 + CICIDS2018 + NSL-KDD:
+- Random Forest: 93-94% accuracy on 8 attack classes
+- PyTorch DNN: 85-86% (LayerNorm architecture — no training oscillation)
+- Binary RF Anomaly Detector: 93% accuracy, 95.9% F1 (replaced Isolation Forest which gave only 43%)
+- Classes: `BENIGN · PORT_SCAN · BRUTE_FORCE · DOS · DDOS · BOTNET · WEB_ATTACK · INFILTRATION`
+
+---
+
+### 🚨 Live Incident Response
+
+When any attack is detected (real or simulated), the SOC dashboard instantly shows:
+
+- **Attacker card** with source IP highlighted in red
+- **IP geolocation** — city, country, ISP, ASN (labeled APPROXIMATE, never fabricated)
+- **Risk score 0–100** with transparent factor breakdown showing what contributed
+- **6 response status badges**: DETECTED → HONEYPOT → ML ENGINE → QUARANTINE → EVIDENCE → BLOCKCHAIN
+- **Detection timer** counting up from 0.00 seconds
+- **Ports scanned** list for port scan attacks
+- **Attack graph** — nodes and edges showing attacker → process → honeypot → files → ML → response
+
+---
+
+### 🔍 Threat Intelligence Enrichment
+
+Every detected attacker IP is automatically enriched with:
+
+- **AbuseIPDB** — abuse confidence score (0–100%), report count, whether it's a Tor exit node (free, 1000/day)
+- **Shodan** — open ports on attacker's machine, running services, known CVEs, OS fingerprint (free 100/month)
+- **VirusTotal** — file hash scanning against 70+ AV engines, malware family identification (free 500/day)
+
+These run in background threads — results appear in the incident card and incident detail page without blocking detection.
+
+---
+
+### 🍯 Active Honeypot
+
+7 decoy files that look like real sensitive data but are completely fake:
+
+- `financial_report_Q4.xlsx`, `employee_data.xlsx`, `passwords.txt`, `backup.zip`, `credentials.db`, `ssh_private_key.pem`, `database_backup.sql`
+- **Active filesystem watcher** (Watchdog) — any READ, OPEN, or WRITE to a decoy file immediately triggers an alert — even from the local machine
+- When triggered: WebSocket event fires, honeypot trigger recorded in DB, incident risk score gets a +25 boost
+- Simulations can deliberately trigger honeypots to demonstrate the detection chain
+
+---
+
+### 🔬 Cyber Range — Safe Attack Simulations
+
+A controlled lab environment with 8 simulation types:
+
+| Simulation | What it does |
+|------------|-------------|
+| `ransomware` | Drops synthetic PE files into `watched/` for ML detection |
+| `portscan` | Generates port scan telemetry events |
+| `brute-force` | Simulates auth attempt events on SSH/RDP |
+| `phishing` | Email attachment → payload → C2 beacon chain |
+| `suspicious-process` | Spawns fake malicious process with honeypot access |
+| `data-exfiltration` | Simulates large outbound data + honeypot access |
+| `honeypot` | Directly accesses decoy files |
+| `full-attack` | 7-stage complete attack: Recon → Brute Force → Process → Honeypot → Files → Exfil → Ransom Note |
+
+All simulations flow through the **same detection pipeline** as real attacks — they're not fake pre-scripted screens, they generate real events that the ML models, correlator, and risk scorer process.
+
+**CLI terminal:**
 ```
-File dropped in watched/
-        │
-        ▼
-Watchdog detects → file_monitor.py
-        │
-        ▼
-Extract 15 PE features
-        │
-        ▼
-Random Forest  (60% weight) → probability
-PyTorch DNN    (40% weight) → probability
-        │
-        ▼
-Combined threat score (0–100)
-        │
-      Score > 70?
-     /           \
-   YES             NO
-    │               │
-    ├─ Auto quarantine file
-    ├─ WebSocket alert to SOC dashboard
-    ├─ Email alert to analyst inbox
-    └─ Log hash to Core Testnet2 blockchain
-                    │
-              Log as benign in SQLite
-                    │
-         Analyst can:
-           → Verify hash on Blockchain page
-           → Download PDF incident report
-           → View SHAP explainability
-           → Manage via Admin panel
-```
-
----
-
-## Features
-
-### Phase 1 — AI Model Training
-- Dataset: **62,485 PE files** (ransomware + benign)
-- **15 extracted features:** Machine, DebugSize, DebugRVA, MajorImageVersion, MajorOSVersion, ExportRVA, ExportSize, IatVRA, MajorLinkerVersion, MinorLinkerVersion, NumberOfSections, SizeOfStackReserve, DllCharacteristics, ResourceSize, BitcoinAddresses
-- Random Forest → **99.62% accuracy**
-- PyTorch DNN (4-layer) → **98.30% accuracy**
-- Ensemble prediction: `RF × 0.60 + DNN × 0.40`
-- SHAP explainability values generated
-
-### Phase 2 — Flask Backend
-- Full REST API with JWT authentication (admin / analyst roles)
-- SQLite threat history database
-- WebSocket real-time alerts via Flask-SocketIO
-- PDF incident report generation
-
-### Phase 3 — React Frontend
-- Cyberpunk dark theme with neon animations
-- Pages: Login, Dashboard, Threats, Analytics, Blockchain, Admin, SOC
-- Live stats cards, threat timeline chart, WebSocket live alerts banner
-
-### Phase 4 — Smart Contract
-- `ThreatLogger.sol` on Core Testnet2 (Chain ID: 1114)
-- Functions: `logThreatSimple()`, `verifyHash()`, `getThreatByHash()`, `getTotalThreats()`
-- Web3.py backend integration with local fallback
-
-### Phase 5 — File Monitor + Auto Quarantine
-- Watchdog monitors `backend/watched/`
-- Supported: `.dll .exe .sys .bat .ps1 .vbs .js .locked .enc .crypto`
-- Files scoring > 70 → auto-quarantined to `backend/quarantine/`
-- WebSocket notification on detection
-
-### Phase 6 — Ransomware Simulator
-6 simulation modes:
-
-| Mode | Description |
-|------|-------------|
-| 1 | Mixed Attack (HIGH + MEDIUM + LOW) — best for demo |
-| 2 | Full Ransomware (all HIGH) |
-| 3 | Gradual Escalation (APT simulation) |
-| 4 | Benign Files Only |
-| 5 | Quick Single File |
-| 6 | Clean watched folder |
-
-### Phase 7 — Email Alert System
-- Gmail SMTP integration
-- HTML dark-themed email template
-- Startup email when backend launches
-- HIGH threat email includes: score, file name, ML/DL confidence, top indicators, blockchain TX link, integrity hash, recommended actions
-
-### Phase 8 — Admin Panel
-4 tabs: Users, Quarantine, System, Settings
-
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/admin/users` | GET / POST | List / add users |
-| `/api/admin/users/<username>` | DELETE | Remove user |
-| `/api/admin/quarantine` | GET | View quarantined files |
-| `/api/admin/quarantine/clear` | DELETE | Clear quarantine |
-| `/api/admin/system` | GET | Platform info |
-| `/api/admin/threats/clear` | DELETE | Clear threat history |
-| `/api/admin/settings` | POST | Update settings |
-
-### Phase 9 — Fullscreen SOC Dashboard
-- Matrix rain background animation
-- Live clock, threat level banner (LOW / MEDIUM / HIGH / CRITICAL)
-- Real-time stats, service status indicators
-- Recent detections table with progress bars
-- Threat distribution chart
-- Live activity feed via WebSocket
-- Auto-refreshes every 5 seconds, fullscreen toggle (F11)
-
----
-
-## Machine Learning Pipeline
-
-```python
-# Ensemble prediction
-rf_prob   = random_forest.predict_proba(features)[0][1]   # 60% weight
-dnn_prob  = pytorch_dnn(features_tensor).item()           # 40% weight
-score     = (rf_prob * 0.60 + dnn_prob * 0.40) * 100
-```
-
-Models are stored in `backend/models/`:
-- `rf_model.pkl` — trained Random Forest
-- `dl_model.pth` — PyTorch DNN weights
-- `scaler.pkl` — StandardScaler for feature normalization
-- `shap_values.json` — pre-computed SHAP explainability data
-
----
-
-## Blockchain Integration
-
-| Item | Value |
-|------|-------|
-| Network | Core Testnet2 |
-| Chain ID | 1114 |
-| RPC | https://rpc.test2.btcs.network |
-| Explorer | https://scan.test2.btcs.network |
-| Contract | `0x9807Ae60581B38611534d656f6a16AF28B846E17` |
-| Deployer Wallet | `0xa0a9579D2F7b201cF2C09C09bE8B6D230b198c13` |
-
-Every HIGH-severity threat logs a SHA-256 hash to the blockchain. Analysts can verify file integrity on the Blockchain page.
-
----
-
-## Project Structure
-
-```
-cyberdefense-platform/
-├── backend/
-│   ├── app.py                    ← Main Flask server (all routes)
-│   ├── .env                      ← Secrets (gitignored)
-│   ├── cyberdefense.db           ← SQLite database
-│   ├── blockchain_log.json       ← Local blockchain fallback log
-│   ├── simulate_ransomware.py    ← 6-mode attack simulator
-│   ├── watched/                  ← Auto-scan drop folder
-│   ├── quarantine/               ← Auto-quarantine folder
-│   ├── models/
-│   │   ├── threat_scorer.py      ← RF + DNN prediction engine
-│   │   ├── file_monitor.py       ← Watchdog auto-scanner
-│   │   ├── rf_model.pkl          ← Random Forest (99.62%)
-│   │   ├── dl_model.pth          ← PyTorch DNN (98.30%)
-│   │   ├── scaler.pkl            ← StandardScaler
-│   │   └── shap_values.json      ← Explainability data
-│   ├── utils/
-│   │   ├── db.py                 ← SQLite operations
-│   │   ├── blockchain_logger.py  ← Web3 + local logging
-│   │   ├── email_alerts.py       ← Gmail SMTP alerts
-│   │   └── report_generator.py   ← PDF reports
-│   └── blockchain/
-│       └── ThreatLogger_ABI.json ← Contract ABI
-├── frontend/
-│   └── src/
-│       ├── App.jsx               ← Router + protected routes
-│       ├── api.js                ← Axios config
-│       ├── index.css             ← Cyberpunk animations
-│       └── pages/
-│           ├── Login.jsx
-│           ├── Dashboard.jsx
-│           ├── Threats.jsx
-│           ├── Analytics.jsx
-│           ├── Blockchain.jsx
-│           ├── Admin.jsx
-│           └── SOC.jsx           ← Fullscreen war room
-├── blockchain/
-│   ├── contracts/
-│   │   └── ThreatLogger.sol      ← Solidity smart contract
-│   ├── scripts/
-│   │   └── deploy.js             ← Hardhat deployment
-│   ├── hardhat.config.js
-│   ├── deployment.json
-│   └── ThreatLogger_ABI.json
-├── notebooks/
-│   └── ransomware_model_training.ipynb
-├── .gitignore
-└── README.md
+python cyberdefense_cli.py simulate full-attack
+python cyberdefense_cli.py simulate brute-force
+python cyberdefense_cli.py status
+python cyberdefense_cli.py incidents
 ```
 
 ---
 
-## Setup & Installation
+### 📊 SOC Dashboard — Real-Time
 
-### Prerequisites
-- Python 3.10+
-- Node.js 18+
-- Git
+The main dashboard shows everything live:
 
-### Backend
+- **Live Incident Card** — slides in when any attack detected, shows attacker geo + risk score + threat intel + response status
+- **8 metric cards**: Files Scanned, Ransomware, High Risk, Suspicious, Active Incidents, Honeypot Hits, System Health, Blockchain Mode
+- **Live Security Alerts feed** — real-time WebSocket events from simulations and real attacks
+- **Live Incidents panel** — correlated incidents with click-through to full detail
+- **Threat Score Timeline** — area chart of historical detections
+- **Detection Heatmap** — 16-week calendar view of activity
+- **Network Events feed** — raw security events from all sources
+
+---
+
+### 🎯 Threat Correlation Engine
+
+Individual events are correlated into high-confidence incidents:
+
+- **Correlation dimensions**: time proximity, source IP, process identity, scenario ID
+- **Signals combined**: ML prediction, file activity, honeypot trigger, network anomaly, process behavior
+- **Risk score formula** (transparent, not hard-coded):
+  - ML Detection: up to +25 points
+  - File Activity: up to +15 points
+  - Honeypot Trigger: up to +25 points
+  - Network Attack: up to +25 points
+  - Process Anomaly: up to +5 points
+  - Multi-signal Correlation bonus: up to +5 points
+
+---
+
+### 🔒 Incident Detail View
+
+Every incident has a 7-tab detail page:
+
+1. **Overview** — attack details, risk score breakdown with factor bars, process info
+2. **Attacker** — IP, geo, MAC note, threat intelligence (AbuseIPDB + Shodan)
+3. **AI Investigate** — AI-assisted investigation using actual incident telemetry
+4. **Timeline** — chronological event timeline with severity markers
+5. **Attack Graph** — nodes/edges: source IP → process → honeypot/files → ML → response
+6. **Evidence** — forensic bundle with SHA-256 hash recorded on blockchain for integrity
+7. **Replay** — replay the actual recorded events in chronological order
+
+---
+
+### ⛓ Blockchain
+
+Every high-severity threat and evidence bundle gets an immutable record:
+
+- Smart contract `ThreatLogger.sol` deployed on **Core Testnet2** (Chain ID 1114)
+- Functions: `logThreatSimple()`, `verifyHash()`, `getThreatByHash()`
+- Analyst can verify any incident hash on the Blockchain page
+- Evidence bundles: SHA-256 of the full forensic bundle stored on-chain
+- Local fallback simulation when wallet balance is insufficient
+
+---
+
+### 🤖 AI Security Analyst Chatbot
+
+Context-aware chatbot with live platform data injected:
+
+- Providers in order: OpenAI GPT-4o-mini → Gemini 2.0 Flash (free) → Groq Llama-3.3-70b (free) → rule-based fallback
+- Knows current threat stats, quarantine state, failed logins, blockchain mode
+- Can answer: "what happened?", "why was this ransomware?", "how many threats today?"
+
+---
+
+### 🧪 What Was Trained
+
+| Model | Dataset | Accuracy | Purpose |
+|-------|---------|----------|---------|
+| Random Forest | 62,485 PE files | 99.62% | Ransomware detection |
+| PyTorch DNN | 62,485 PE files | 98.30% | Ransomware detection |
+| Network RF | CICIDS2017 + 2018 | 93-94% | 8-class network attack |
+| Network DNN | CICIDS2017 + 2018 | 85-86% | 8-class network attack |
+| Binary RF | CICIDS2017 + 2018 | 93.3% | Anomaly detection |
+| NSL-KDD RF | NSL-KDD | 97%+ | DoS/Scan/BruteForce |
+| NSL-KDD DNN | NSL-KDD | 97.38% | DoS/Scan/BruteForce |
+
+---
+
+### 🔑 External APIs Used
+
+| Service | Purpose | Free Tier |
+|---------|---------|-----------|
+| ipinfo.io | IP geolocation (primary, HTTPS) | 50k/month |
+| ip-api.com | IP geolocation (fallback) | 45 req/min |
+| Core Testnet2 | Blockchain logging | Free testnet |
+| AbuseIPDB | IP abuse reputation | 1000/day |
+| Shodan | Host fingerprinting | 100/month |
+| VirusTotal | File hash scanning | 500/day |
+| Gemini 2.0 Flash | AI chatbot | Free tier |
+| Groq Llama-3.3 | AI chatbot fallback | Free tier |
+| Gmail SMTP | Email alerts | Free |
+
+---
+
+### 🚀 How to Run
 
 ```powershell
-cd backend
-python -m venv venv
-venv\Scripts\activate
-pip install flask flask-socketio flask-jwt-extended flask-cors \
-    scikit-learn torch numpy pandas watchdog web3 \
-    python-dotenv reportlab shap pefile
-```
-
-Create `backend/.env`:
-```env
-FLASK_ENV=development
-SECRET_KEY=your-secret-key
-MONITOR_PATH=C:\path\to\backend\watched
-ETH_RPC_URL=https://rpc.test2.btcs.network
-CONTRACT_ADDRESS=0x9807Ae60581B38611534d656f6a16AF28B846E17
-WALLET_PRIVATE_KEY=your-private-key
-CHAIN_ID=1114
-EMAIL_SENDER=your@gmail.com
-EMAIL_PASSWORD=your-app-password
-EMAIL_RECEIVER=analyst@example.com
-EMAIL_ENABLED=true
-```
-
-### Frontend
-
-```powershell
-cd frontend
-npm install
-```
-
-### Blockchain (optional re-deploy)
-
-```powershell
-cd blockchain
-npm install
-npx hardhat run scripts/deploy.js --network coreTestnet2
-```
-
----
-
-## Usage
-
-```powershell
-# Terminal 1 — Backend
+# Terminal 1 — Backend (normal)
 cd backend
 venv\Scripts\activate
 python app.py
+
+# Terminal 1 — Backend (full packet capture, catches nmap)
+backend\start_admin.bat
 
 # Terminal 2 — Frontend
 cd frontend
 npm run dev
 
-# Terminal 3 — Run ransomware simulation (demo)
+# Terminal 3 — Attack simulation
 cd backend
-venv\Scripts\activate
-python simulate_ransomware.py
+python cyberdefense_cli.py simulate full-attack
+```
+
+**Add API keys to `backend/.env`:**
+```env
+GEMINI_API_KEY=...         # free at aistudio.google.com
+ABUSEIPDB_API_KEY=...      # free at abuseipdb.com
+SHODAN_API_KEY=...          # free at shodan.io
+VIRUSTOTAL_API_KEY=...      # free at virustotal.com
+IPINFO_TOKEN=...            # optional, free at ipinfo.io
 ```
 
 ---
 
-## API Reference
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/api/login` | POST | — | Obtain JWT token |
-| `/api/predict` | POST | JWT | Analyze file features |
-| `/api/threats` | GET | JWT | Threat history |
-| `/api/stats` | GET | JWT | Platform statistics |
-| `/api/shap` | GET | JWT | SHAP explainability data |
-| `/api/report` | POST | JWT | Generate PDF report |
-| `/api/admin/users` | GET/POST | Admin | Manage users |
-| `/api/admin/quarantine` | GET | Admin | View quarantine |
-| `/api/admin/quarantine/clear` | DELETE | Admin | Clear quarantine |
-| `/api/admin/system` | GET | Admin | System info |
-| `/api/admin/threats/clear` | DELETE | Admin | Clear threat log |
-| `/api/admin/settings` | POST | Admin | Update settings |
-
----
-
-## Demo Credentials
+### 🔐 Demo Credentials
 
 | User | Password | Role |
 |------|----------|------|
@@ -348,52 +245,4 @@ python simulate_ransomware.py
 
 ---
 
-## URLs
-
-| Service | URL |
-|---------|-----|
-| Frontend | http://localhost:5173 |
-| Backend API | http://localhost:5000 |
-| SOC Dashboard | http://localhost:5173/soc |
-| Admin Panel | http://localhost:5173/admin |
-| Blockchain Page | http://localhost:5173/blockchain |
-| Contract Explorer | https://scan.test2.btcs.network/address/0x9807Ae60581B38611534d656f6a16AF28B846E17 |
-
----
-
-## Build History
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Dataset & Model Training (RF 99.62% + DNN 98.30%) | ✅ Complete |
-| 2 | Flask REST API + JWT + SQLite + WebSocket | ✅ Complete |
-| 3 | React Frontend — Cyberpunk Dark Theme | ✅ Complete |
-| 4 | Solidity Smart Contract + Core Testnet2 Deployment | ✅ Complete |
-| 5 | Watchdog File Monitor + Auto Quarantine | ✅ Complete |
-| 6 | 6-Mode Ransomware Simulator | ✅ Complete |
-| 7 | Gmail Email Alert System | ✅ Complete |
-| 8 | Admin Panel (Users / Quarantine / System / Settings) | ✅ Complete |
-| 9 | Fullscreen SOC War Room Dashboard | ✅ Complete |
-| 10 | GitHub Push | ✅ Complete |
-
-### Planned Features
-
-| Feature | Priority |
-|---------|----------|
-| AI Chatbot integration | HIGH |
-| Network Traffic Analysis | MEDIUM |
-
----
-
-## What Makes This Project Stand Out
-
-- **Real blockchain** — not simulated, actual on-chain transactions on Core Testnet2
-- **Dual AI ensemble** — Random Forest + PyTorch DNN with weighted voting
-- **Live attack simulation** — 6-mode ransomware simulator for controlled demos
-- **Auto incident response** — quarantine + email + blockchain logging in seconds
-- **SHAP explainability** — every prediction is interpretable
-- **Production-ready** — JWT auth, WebSocket, PDF reports, role-based access
-
----
-
-*Built with ❤️ by Gagandeep Singh — Hackathon / Portfolio Project*
+*Built by Gagandeep Singh — turning a hackathon ransomware detector into a full SOC platform.*

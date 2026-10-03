@@ -1,12 +1,17 @@
 """
 IP Geolocation Lookup
-Uses ip-api.com (free, no key required for non-commercial use).
-Always labels results as APPROXIMATE and never fabricates data.
+Primary:   ipinfo.io  (HTTPS, free 50k/month, more accurate)
+           Set IPINFO_TOKEN in .env for higher rate limits (free at ipinfo.io)
+Fallback:  ip-api.com (free, no key, HTTP only, 45 req/min)
+Always labels results as APPROXIMATE — never fabricates location data.
 Private/local IPs are identified without any lookup attempt.
 """
+import os
 import ipaddress
 import requests
 from functools import lru_cache
+
+IPINFO_TOKEN = os.getenv('IPINFO_TOKEN', '').strip()
 
 # RFC 1918 + loopback + link-local
 _PRIVATE_NETWORKS = [
@@ -35,31 +40,79 @@ def is_private_ip(ip: str) -> bool:
 @lru_cache(maxsize=256)
 def _cached_lookup(ip: str) -> dict:
     """Cached lookup — avoids repeated calls for same IP within process lifetime."""
+    # Try ipinfo.io first (HTTPS, more accurate, free 50k/month)
+    result = _lookup_ipinfo(ip)
+    if result:
+        return result
+    # Fallback to ip-api.com
+    return _lookup_ipapi(ip)
+
+
+def _lookup_ipinfo(ip: str) -> dict:
+    """ipinfo.io — HTTPS, free 50k/month, optional token for higher limits."""
+    try:
+        url    = f'https://ipinfo.io/{ip}/json'
+        params = {'token': IPINFO_TOKEN} if IPINFO_TOKEN else {}
+        r = requests.get(url, params=params, timeout=5)
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        if d.get('bogon'):
+            return None
+
+        lat, lon = None, None
+        if d.get('loc'):
+            try:
+                lat, lon = [float(x) for x in d['loc'].split(',')]
+            except Exception:
+                pass
+
+        return {
+            'ip':          d.get('ip', ip),
+            'country':     d.get('country', 'Unknown'),
+            'region':      d.get('region', 'Unknown'),
+            'city':        d.get('city', 'Unknown'),
+            'lat':         lat,
+            'lon':         lon,
+            'isp':         d.get('org', 'Unknown'),
+            'asn':         d.get('org', '').split(' ')[0] if d.get('org') else 'Unknown',
+            'org':         d.get('org', 'Unknown'),
+            'timezone':    d.get('timezone', 'Unknown'),
+            'hostname':    d.get('hostname', ''),
+            'approximate': True,
+            'source':      'ipinfo.io',
+        }
+    except Exception:
+        return None
+
+
+def _lookup_ipapi(ip: str) -> dict:
+    """ip-api.com fallback — HTTP only, free, 45 req/min."""
     try:
         r = requests.get(
             f'http://ip-api.com/json/{ip}',
             params={'fields': 'status,country,regionName,city,lat,lon,isp,as,org,timezone,query'},
-            timeout=4
+            timeout=4,
         )
         data = r.json()
-        if data.get('status') == 'success':
-            return {
-                'ip':           data.get('query', ip),
-                'country':      data.get('country', 'Unknown'),
-                'region':       data.get('regionName', 'Unknown'),
-                'city':         data.get('city', 'Unknown'),
-                'lat':          data.get('lat'),
-                'lon':          data.get('lon'),
-                'isp':          data.get('isp', 'Unknown'),
-                'asn':          data.get('as', 'Unknown'),
-                'org':          data.get('org', 'Unknown'),
-                'timezone':     data.get('timezone', 'Unknown'),
-                'approximate':  True,
-                'source':       'ip-api.com',
-            }
+        if data.get('status') != 'success':
+            return None
+        return {
+            'ip':          data.get('query', ip),
+            'country':     data.get('country', 'Unknown'),
+            'region':      data.get('regionName', 'Unknown'),
+            'city':        data.get('city', 'Unknown'),
+            'lat':         data.get('lat'),
+            'lon':         data.get('lon'),
+            'isp':         data.get('isp', 'Unknown'),
+            'asn':         data.get('as', 'Unknown'),
+            'org':         data.get('org', 'Unknown'),
+            'timezone':    data.get('timezone', 'Unknown'),
+            'approximate': True,
+            'source':      'ip-api.com',
+        }
     except Exception:
-        pass
-    return None
+        return None
 
 
 def geolocate(ip: str) -> dict:
@@ -106,7 +159,7 @@ def format_geo_display(geo: dict) -> dict:
         }
 
     if t == 'approximate':
-        parts = [geo.get('city'), geo.get('region'), geo.get('country')]
+        parts        = [geo.get('city'), geo.get('region'), geo.get('country')]
         location_str = ', '.join(p for p in parts if p and p != 'Unknown')
         return {
             'type':     'approximate',
@@ -120,8 +173,9 @@ def format_geo_display(geo: dict) -> dict:
             'asn':      geo.get('asn'),
             'org':      geo.get('org'),
             'timezone': geo.get('timezone'),
+            'hostname': geo.get('hostname', ''),
+            'source':   geo.get('source', 'ipinfo.io'),
             'note':     'APPROXIMATE IP GEOLOCATION — does not represent exact physical location',
-            'source':   geo.get('source', 'ip-api.com'),
         }
 
     return {

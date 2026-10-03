@@ -1,7 +1,7 @@
 """
 Honeypot System for CyberDefense-AI
-Creates and monitors decoy files that should never be legitimately accessed.
-Any interaction is a strong indicator of malicious activity.
+Creates and ACTIVELY MONITORS decoy files that should never be legitimately accessed.
+Uses watchdog filesystem watcher — any READ, WRITE, or OPEN triggers an alert.
 All honeypot files contain clearly fake/synthetic data.
 """
 import os
@@ -59,6 +59,106 @@ HONEYPOT_FILES = {
 _lock = threading.Lock()
 _access_log: list = []
 _trigger_callbacks: list = []
+_watcher_active = False
+
+
+def setup_honeypot() -> bool:
+    """Create honeypot directory and all decoy files. Idempotent."""
+    try:
+        os.makedirs(HONEYPOT_DIR, exist_ok=True)
+        for filename, content in HONEYPOT_FILES.items():
+            path = os.path.join(HONEYPOT_DIR, filename)
+            if not os.path.exists(path):
+                with open(path, 'wb') as f:
+                    f.write(content)
+        print(f"🍯 Honeypot initialized: {HONEYPOT_DIR} ({len(HONEYPOT_FILES)} decoy files)")
+        return True
+    except Exception as e:
+        print(f"⚠️  Honeypot setup failed: {e}")
+        return False
+
+
+def start_honeypot_watcher() -> bool:
+    """
+    Start active filesystem watcher on honeypot directory.
+    Any access (read, write, open, delete) to a decoy file triggers an alert.
+    Uses watchdog — same library as the file monitor.
+    """
+    global _watcher_active
+    if _watcher_active:
+        return True
+
+    try:
+        from watchdog.observers import Observer
+        from watchdog.events import FileSystemEventHandler
+
+        class HoneypotHandler(FileSystemEventHandler):
+            def _handle(self, event, operation):
+                if event.is_directory:
+                    return
+                fname = os.path.basename(event.src_path)
+                if fname in HONEYPOT_FILES:
+                    # Get process that accessed the file (best effort)
+                    proc_name, proc_pid = _get_accessor_process(event.src_path)
+                    record_trigger(
+                        resource=fname,
+                        process_name=proc_name,
+                        process_pid=proc_pid,
+                        source_ip=None,   # filesystem access — no IP
+                        operation=operation,
+                    )
+
+            def on_opened(self, event):   self._handle(event, 'OPEN')
+            def on_accessed(self, event): self._handle(event, 'READ')
+            def on_modified(self, event): self._handle(event, 'WRITE')
+            def on_created(self, event):  self._handle(event, 'CREATE')
+            def on_deleted(self, event):  self._handle(event, 'DELETE')
+            # Fallback for watchdog versions that don't have on_opened
+            def on_any_event(self, event):
+                if hasattr(event, 'event_type') and event.event_type in ('opened', 'accessed'):
+                    self._handle(event, event.event_type.upper())
+
+        observer = Observer()
+        handler  = HoneypotHandler()
+        observer.schedule(handler, HONEYPOT_DIR, recursive=False)
+        observer.start()
+
+        _watcher_active = True
+        print(f"🍯 Honeypot watcher ACTIVE — monitoring {HONEYPOT_DIR}")
+        print(f"   Any access to decoy files will trigger an alert")
+        return True
+
+    except Exception as e:
+        print(f"⚠️  Honeypot watcher failed to start: {e}")
+        print(f"   Decoy files exist but filesystem access won't auto-detect")
+        return False
+
+
+def _get_accessor_process(filepath: str):
+    """Try to find which process is accessing the file using psutil."""
+    try:
+        import psutil
+        fname = os.path.basename(filepath)
+        for proc in psutil.process_iter(['pid', 'name', 'open_files']):
+            try:
+                files = proc.info.get('open_files') or []
+                for f in files:
+                    if fname in f.path:
+                        return proc.info['name'], proc.info['pid']
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+    return 'Unknown', None
+
+
+def get_watcher_status() -> dict:
+    return {
+        'active':      _watcher_active,
+        'directory':   HONEYPOT_DIR,
+        'file_count':  len(HONEYPOT_FILES),
+        'trigger_count': get_trigger_count(),
+    }
 
 
 def setup_honeypot() -> bool:
