@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { predict, uploadScan, exportThreatsCSV, getThreats } from '../api'
 import io from 'socket.io-client'
+import WorkspaceSwitcher from '../components/WorkspaceSwitcher'
 
 const DEFAULTS = {
   Machine: 332, DebugSize: 0, DebugRVA: 0, MajorImageVersion: 0,
@@ -32,7 +33,7 @@ export default function Threats() {
 
   useEffect(() => {
     const socket = io('http://localhost:5000', {
-      transports: ['websocket', 'polling']
+      transports: ['polling']
     })
     socket.on('connect',           ()     => setWsStatus('connected'))
     socket.on('disconnect',        ()     => setWsStatus('disconnected'))
@@ -131,11 +132,13 @@ export default function Threats() {
   return (
     <div className="min-h-screen bg-black cyber-grid p-6">
 
+      <WorkspaceSwitcher />
+
       {/* Header */}
       <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-2xl font-bold neon-text-blue tracking-widest cursor">
-            LIVE THREAT MONITOR
+            RANSOMWARE DEFENSE CENTER
           </h1>
           <div className="flex items-center gap-3 mt-1">
             <div className={`w-2 h-2 rounded-full ${wsStatus === 'connected' ? 'bg-green-400' : 'bg-red-500'}`}
@@ -147,7 +150,7 @@ export default function Threats() {
             </span>
             <span className="text-xs text-gray-600">|</span>
             <span className="text-xs text-gray-500">
-              Auto-scan: <span className="text-green-400">ACTIVE</span>
+              Ransomware scanner: <span className="text-green-400">ACTIVE</span>
             </span>
           </div>
         </div>
@@ -160,8 +163,11 @@ export default function Threats() {
             className="px-4 py-2 text-xs border border-red-500 text-red-500 rounded hover:bg-red-500 hover:text-black transition">
             🚨 TEST ALERT
           </button>
+          <Link to="/ransomware-history" className="px-4 py-2 text-xs border border-red-500 text-red-400 rounded hover:bg-red-500 hover:text-black transition">
+            🧬 HISTORY
+          </Link>
           <Link to="/" className="px-4 py-2 text-xs border border-cyan-400 text-cyan-400 rounded hover:bg-cyan-400 hover:text-black transition">
-            ← DASHBOARD
+            ← SOC DASHBOARD
           </Link>
         </div>
       </div>

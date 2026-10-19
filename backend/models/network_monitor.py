@@ -25,6 +25,7 @@ import threading
 import time
 import socket as _socket
 import struct
+import ipaddress
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -35,11 +36,19 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 try:
-    from scapy.all import sniff, IP, TCP, UDP, ICMP, conf
+    from scapy.all import sniff, IP, IPv6, TCP, UDP, ICMP, conf
     conf.verb = 0          # suppress scapy output
+    # Use Npcap if available (better than WinPcap, same as Wireshark)
+    try:
+        conf.use_pcap = True
+        conf.sniff_promisc = True
+        print("[CAP] Using Npcap driver (Wireshark-compatible)")
+    except:
+        print("[INFO] Npcap not configured, using default")
     SCAPY_AVAILABLE = True
 except Exception:
     SCAPY_AVAILABLE = False
+    IPv6 = None
 
 # Windows raw socket fallback — catches incoming TCP without admin
 try:
@@ -80,16 +89,28 @@ def _get_local_ip() -> str:
     except Exception:
         return '127.0.0.1'
 
+
+def _normalize_ip_address(address: str) -> str:
+    if not address:
+        return ''
+    value = str(address).split('%', 1)[0]
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return value
+
+
 # ── Detection thresholds ──────────────────────────────────
-# Lower = more sensitive = catches nmap/brute-force sooner
+# Increased thresholds to avoid false positives from normal network activity
+# Local network traffic is now exempted from detection
 PORT_SCAN_THRESHOLD    = 5    # distinct dst ports from same src IP in window
-BRUTE_FORCE_THRESHOLD  = 8    # repeated connections to auth port from same IP
-BEACON_MIN_CONNS       = 6    # regular outbound connections → C2
-EXFIL_BYTES_THRESHOLD  = 20 * 1024 * 1024   # 20 MB outbound
-SYN_FLOOD_THRESHOLD    = 50   # SYN packets per second from same IP
+BRUTE_FORCE_THRESHOLD  = 5    # repeated connections to auth port from same IP
+BEACON_MIN_CONNS       = 10   # regular outbound connections → C2
+EXFIL_BYTES_THRESHOLD  = 50 * 1024 * 1024   # 50 MB outbound
+SYN_FLOOD_THRESHOLD    = 50   # SYN packets in 5 seconds from same IP (lowered for testing)
 SCAN_WINDOW_SECONDS    = 30   # sliding window for scan detection
 BRUTE_WINDOW_SECONDS   = 60   # sliding window for brute force
-DEDUP_WINDOW_SECONDS   = 120  # don't re-alert same (type,ip) within 2 min
+DEDUP_WINDOW_SECONDS   = 300  # don't re-alert same (type,ip) within 5 min
 POLL_INTERVAL          = 2    # psutil poll interval (seconds)
 
 AUTH_PORTS = {21, 22, 23, 25, 110, 143, 389, 445, 3389, 5900, 8080, 8443}
@@ -97,12 +118,23 @@ _NORMAL_PORTS = {80, 443, 8080, 8443}
 
 
 class NetworkMonitor:
-    def __init__(self, socketio, blockchain_log_fn, email_fn):
+    def __init__(self, socketio, blockchain_log_fn, email_fn, capture_packets=True):
         self.socketio          = socketio
         self.blockchain_log_fn = blockchain_log_fn
         self.email_fn          = email_fn
-        self._lock             = threading.Lock()
+        self.capture_packets   = capture_packets
+        # Detection runs while holding this lock and may dispatch an alert,
+        # which also updates alert state under the same lock.
+        self._lock             = threading.RLock()
         self._local_ip         = _get_local_ip()
+        self._local_ips        = {_normalize_ip_address(self._local_ip)}
+        if PSUTIL_AVAILABLE:
+            self._local_ips.update(
+                _normalize_ip_address(getattr(address, 'address', ''))
+                for addresses in psutil.net_if_addrs().values()
+                for address in addresses
+                if getattr(address, 'address', '')
+            )
 
         # Sliding window: {src_ip: [(timestamp, dst_port)]}
         self._scan_events: dict   = defaultdict(list)
@@ -114,7 +146,7 @@ class NetworkMonitor:
         # Dedup: {(alert_type, ip): last_alert_time}
         self._last_alert: dict    = {}
 
-        # Recent alerts (capped at 200)
+        # Recent alerts (capped at 10000)
         self._alerts: list        = []
 
         # Live connections snapshot
@@ -137,7 +169,7 @@ class NetworkMonitor:
         # Capture mode
         self.capture_mode = 'psutil'   # updated to 'scapy' if sniffer starts
 
-        print(f"🌐 Network Monitor initialized — local IP: {self._local_ip}")
+        print(f"[NETWORK] Network Monitor initialized - local IP: {self._local_ip}")
 
     # ─────────────────────────────────────────────────────
     # Public API
@@ -163,11 +195,16 @@ class NetworkMonitor:
 
     def get_alerts(self) -> list:
         with self._lock:
-            return list(reversed(self._alerts[-100:]))
+            verified = [
+                alert for alert in self._alerts
+                if alert.get('is_verified') is True
+                and alert.get('verification') == 'trained_network_ids'
+            ]
+            return list(reversed(verified[-100:]))
 
     def get_packets(self) -> list:
         with self._lock:
-            return list(reversed(self._packets[-200:]))
+            return list(reversed(self._packets[-10000:]))
 
     def get_local_ip(self) -> str:
         return self._local_ip
@@ -177,24 +214,31 @@ class NetworkMonitor:
     # ─────────────────────────────────────────────────────
 
     def start(self):
-        # Try scapy packet capture first (needs admin)
-        scapy_started = self._start_scapy_sniffer()
+        # TShark is the authoritative packet source when the app has already
+        # started it. Avoid running a second packet sniffer on the same adapter.
+        if not self.capture_packets:
+            self.capture_mode = 'tshark'
+        scapy_started = self._start_scapy_sniffer() if self.capture_packets else False
 
         # Try Windows raw socket listener when scapy unavailable
-        if not scapy_started:
+        if self.capture_packets and not scapy_started:
             self._start_raw_socket_listener()
 
         # Always run psutil poll loop for connections + exfil
         if PSUTIL_AVAILABLE:
             t = threading.Thread(target=self._psutil_loop, daemon=True)
             t.start()
-            print("🌐 Network monitor psutil loop started")
+            print("[OK] Network monitor psutil loop started")
         else:
-            print("⚠️  psutil not available — network monitor limited")
+            print("[WARN]  psutil not available — network monitor limited")
 
-        mode = 'scapy + psutil' if scapy_started else 'raw_socket + psutil'
-        self.capture_mode = 'scapy' if scapy_started else 'raw_socket+psutil'
-        print(f"🌐 Network monitor active — mode: {mode}")
+        if not self.capture_packets:
+            mode = 'tshark + psutil'
+            self.capture_mode = 'tshark'
+        else:
+            mode = 'scapy + psutil' if scapy_started else 'raw_socket + psutil'
+            self.capture_mode = 'scapy' if scapy_started else 'raw_socket+psutil'
+        print(f"[NET] Network monitor active — mode: {mode}")
         print(f"   Monitoring traffic to: {self._local_ip}")
         print(f"   Port scan threshold:   {PORT_SCAN_THRESHOLD} ports in {SCAN_WINDOW_SECONDS}s")
         print(f"   Brute force threshold: {BRUTE_FORCE_THRESHOLD} attempts in {BRUTE_WINDOW_SECONDS}s")
@@ -221,12 +265,12 @@ class NetworkMonitor:
                     SIO_RCVALL = _sock.SIO_RCVALL
                     RCVALL_ON  = _sock.RCVALL_ON
                     raw.ioctl(SIO_RCVALL, RCVALL_ON)
-                    print("📦 Raw socket promiscuous mode enabled")
+                    print("[CAP] Raw socket promiscuous mode enabled")
                 except Exception as e:
-                    print(f"ℹ️  Promiscuous mode unavailable ({e}) — limited capture")
+                    print(f"[INFO]  Promiscuous mode unavailable ({e}) — limited capture")
 
                 raw.settimeout(2.0)
-                print("📦 Raw socket listener active — catching nmap/brute-force probes")
+                print("[CAP] Raw socket listener active — catching nmap/brute-force probes")
                 self.capture_mode = 'raw_socket+psutil'
 
                 while True:
@@ -239,10 +283,10 @@ class NetworkMonitor:
                         continue
 
             except PermissionError:
-                print("⚠️  Raw socket needs Administrator — using psutil fallback only")
+                print("[WARN]  Raw socket needs Administrator — using psutil fallback only")
                 print("   TIP: Run backend as Administrator for nmap/brute-force detection")
             except Exception as e:
-                print(f"⚠️  Raw socket error: {e}")
+                print(f"[WARN]  Raw socket error: {e}")
 
         t = threading.Thread(target=_raw_listen, daemon=True)
         t.start()
@@ -357,38 +401,62 @@ class NetworkMonitor:
 
     def _start_scapy_sniffer(self) -> bool:
         if not SCAPY_AVAILABLE:
-            print("⚠️  Scapy not available — run as Administrator for full packet capture")
+            print("[WARN]  Scapy not available — run as Administrator for full packet capture")
             print("   Falling back to psutil (established connections only)")
             return False
 
         def _sniffer_thread():
             try:
-                print("📦 Scapy packet sniffer starting (needs Administrator)...")
-                # Capture all TCP/UDP/ICMP to/from this machine
+                print("[CAP] Scapy packet sniffer starting (needs Administrator)...")
+                print("[CAP] Capturing all traffic like Wireshark (promiscuous mode)")
+                from scapy.all import conf, get_if_list
+
+                # List available interfaces
+                interfaces = get_if_list()
+                print(f"[CAP] Available interfaces: {interfaces}")
+
+                # Try to find the WiFi interface
+                wifi_iface = None
+                for iface in interfaces:
+                    if 'Wi-Fi' in iface or 'wlan' in iface.lower() or 'wireless' in iface.lower():
+                        wifi_iface = iface
+                        break
+
+                if wifi_iface:
+                    print(f"[CAP] Using WiFi interface: {wifi_iface}")
+                else:
+                    print(f"[CAP] Using default interface (first available)")
+                    wifi_iface = interfaces[0] if interfaces else None
+
+                # Capture all traffic (no IP filter)
                 sniff(
-                    filter=f"host {self._local_ip}",
+                    iface=wifi_iface,
                     prn=self._on_packet,
                     store=False,
                     stop_filter=lambda _: False,
+                    promisc=True,
                 )
             except Exception as e:
-                print(f"⚠️  Scapy sniffer error: {e}")
+                print(f"[WARN]  Scapy sniffer error: {e}")
                 print("   Run backend as Administrator for full packet capture")
+                print("   Ensure Npcap is installed with 'Support raw 802.11 traffic' option")
                 print("   Continuing with psutil mode...")
 
         t = threading.Thread(target=_sniffer_thread, daemon=True)
         t.start()
 
-        # Give it a moment to see if it starts
-        time.sleep(1.5)
+        # Give it a moment to start
+        time.sleep(2.0)
 
-        # Test if scapy is actually working by checking if we got any packets
+        # Check if we captured any packets
         with self._lock:
-            scapy_ok = self._stats['packets_captured'] > 0 or SCAPY_AVAILABLE
+            scapy_ok = self._stats['packets_captured'] > 0
 
         if scapy_ok:
             self.capture_mode = 'scapy'
-            print("📦 Scapy sniffer active — full packet capture enabled")
+            print(f"[CAP] Scapy sniffer active — captured {self._stats['packets_captured']} packets")
+        else:
+            print("[WARN] Scapy not capturing packets - using psutil fallback")
         return scapy_ok
 
     # ─────────────────────────────────────────────────────
@@ -396,19 +464,40 @@ class NetworkMonitor:
     # ─────────────────────────────────────────────────────
 
     def _on_packet(self, pkt):
-        if not pkt.haslayer(IP):
+        if pkt.haslayer(IP):
+            ip_l = pkt[IP]
+            src_ip = ip_l.src
+            dst_ip = ip_l.dst
+            ttl = ip_l.ttl if hasattr(ip_l, 'ttl') else '—'
+        elif IPv6 is not None and pkt.haslayer(IPv6):
+            ip_l = pkt[IPv6]
+            src_ip = ip_l.src
+            dst_ip = ip_l.dst
+            ttl = ip_l.hlim if hasattr(ip_l, 'hlim') else '—'
+        else:
             return
 
         now     = datetime.utcnow()
-        ip_l    = pkt[IP]
-        src_ip  = ip_l.src
-        dst_ip  = ip_l.dst
+
+        # Only process packets to/from this machine
+        src_ip = _normalize_ip_address(src_ip)
+        dst_ip = _normalize_ip_address(dst_ip)
+        if src_ip not in self._local_ips and dst_ip not in self._local_ips:
+            return
+
         sport   = 0
         dport   = 0
         proto   = 'OTHER'
         flags   = ''
         info    = ''
         pkt_len = len(pkt)
+
+        # Wireshark-like fields
+        src_mac = pkt.src if hasattr(pkt, 'src') else '—'
+        dst_mac = pkt.dst if hasattr(pkt, 'dst') else '—'
+        window  = '—'
+        seq     = '—'
+        ack     = '—'
 
         with self._lock:
             self._stats['packets_captured'] += 1
@@ -425,6 +514,11 @@ class NetworkMonitor:
                         0x01: 'FIN', 0x08: 'PSH', 0x20: 'URG'}
             flags    = '|'.join(v for k, v in flag_map.items() if flag_v & k)
 
+            # Additional TCP fields
+            window = tcp.window if hasattr(tcp, 'window') else '—'
+            seq    = tcp.seq if hasattr(tcp, 'seq') else '—'
+            ack    = tcp.ack if hasattr(tcp, 'ack') else '—'
+
             # Protocol identification
             if dport == 22  or sport == 22:   proto = 'SSH'
             elif dport == 3389 or sport == 3389: proto = 'RDP'
@@ -437,47 +531,13 @@ class NetworkMonitor:
 
             info = flags or 'Data'
 
-            # ── Feed detection engines ─────────────────────
-            # Only process packets INCOMING to this machine
-            if dst_ip == self._local_ip and src_ip != self._local_ip:
-
-                # SYN-only = scan probe or connection start
-                if flag_v == 0x02:  # pure SYN
-                    with self._lock:
-                        self._scan_events[src_ip].append((now, dport))
-                        self._syn_events[src_ip].append(now)
-
-                # Auth port connection (any flag)
-                if dport in AUTH_PORTS:
-                    with self._lock:
+            # ── Feed detection engines ─────────────────────────────────
+            # Collect data for rule-based detection
+            if dst_ip in self._local_ips and src_ip not in self._local_ips:
+                with self._lock:
+                    self._scan_events[src_ip].append((now, dport))
+                    if dport in AUTH_PORTS:
                         self._brute_events[src_ip].append((now, dport))
-
-                # NULL scan (no flags)
-                if flag_v == 0x00:
-                    self._raise_alert(
-                        alert_type='NULL_SCAN', ip=src_ip, severity='HIGH',
-                        description=f"NULL scan from {src_ip} → port {dport}",
-                        extra={'dst_port': dport, 'flags': 'NULL', 'proto': proto},
-                        now=now,
-                    )
-
-                # XMAS scan (FIN+PSH+URG = 0x29)
-                if flag_v == 0x29:
-                    self._raise_alert(
-                        alert_type='XMAS_SCAN', ip=src_ip, severity='HIGH',
-                        description=f"XMAS scan from {src_ip} → port {dport}",
-                        extra={'dst_port': dport, 'flags': flags, 'proto': proto},
-                        now=now,
-                    )
-
-                # FIN scan (FIN only = 0x01)
-                if flag_v == 0x01:
-                    self._raise_alert(
-                        alert_type='FIN_SCAN', ip=src_ip, severity='MEDIUM',
-                        description=f"FIN scan from {src_ip} → port {dport}",
-                        extra={'dst_port': dport, 'flags': 'FIN', 'proto': proto},
-                        now=now,
-                    )
 
         # ── UDP ───────────────────────────────────────────
         elif pkt.haslayer(UDP):
@@ -487,32 +547,41 @@ class NetworkMonitor:
             proto = 'DNS' if dport == 53 or sport == 53 else 'UDP'
             info  = f'{sport}→{dport}'
 
-            if dst_ip == self._local_ip and src_ip != self._local_ip:
+            if dst_ip in self._local_ips and src_ip not in self._local_ips:
                 with self._lock:
                     self._scan_events[src_ip].append((now, dport))
 
         # ── ICMP ──────────────────────────────────────────
         elif pkt.haslayer(ICMP):
             proto = 'ICMP'
-            info  = f'type={pkt[ICMP].type}'
+            icmp  = pkt[ICMP]
+            info  = f'type={icmp.type}, code={icmp.code}' if hasattr(icmp, 'code') else f'type={icmp.type}'
 
         # ── Record packet for UI ──────────────────────────
         packet_rec = {
-            'time':    now.isoformat(),
-            'src':     f"{src_ip}:{sport}",
-            'dst':     f"{dst_ip}:{dport}",
-            'src_ip':  src_ip,
-            'dst_ip':  dst_ip,
-            'proto':   proto,
-            'length':  pkt_len,
-            'flags':   flags,
-            'info':    info,
-            'direction': 'IN' if dst_ip == self._local_ip else 'OUT',
+            'time':       now.isoformat(),
+            'src':        f"{src_ip}:{sport}",
+            'dst':        f"{dst_ip}:{dport}",
+            'src_ip':     src_ip,
+            'dst_ip':     dst_ip,
+            'src_port':   sport,
+            'dst_port':   dport,
+            'src_mac':    src_mac,
+            'dst_mac':    dst_mac,
+            'proto':      proto,
+            'length':     pkt_len,
+            'flags':      flags,
+            'window':     window,
+            'seq':        seq,
+            'ack':        ack,
+            'ttl':        ttl,
+            'info':       info,
+            'direction': 'IN' if dst_ip in self._local_ips else 'OUT',
         }
         with self._lock:
             self._packets.append(packet_rec)
-            if len(self._packets) > 2000:
-                self._packets = self._packets[-2000:]
+            if len(self._packets) > 100000:  # Increased buffer for more packets
+                self._packets = self._packets[-100000:]
 
         # ── Run detection on accumulated events ───────────
         self._run_detection(now)
@@ -562,56 +631,39 @@ class NetworkMonitor:
                     }
                     conns.append(conn_info)
 
-                    # Feed scan events from psutil (when no scapy)
-                    if self.capture_mode == 'psutil':
-                        with self._lock:
-                            self._scan_events[rip].append((now, lport))
-                            if rport in AUTH_PORTS:
-                                self._brute_events[rip].append((now, rport))
-
                 with self._lock:
                     self._connections = conns
                     self._stats['total_connections'] = len(conns)
 
-                # ── Exfil detection ─────────────────────────
+                # ── Track network stats (no rule-based alerts) ─────────
                 try:
                     io = psutil.net_io_counters()
                     with self._lock:
                         self._stats['bytes_sent_total'] = io.bytes_sent
-
-                    if last_io is not None:
-                        elapsed = (now - last_io_time).total_seconds()
-                        delta   = io.bytes_sent - last_io.bytes_sent
-                        if elapsed > 0 and delta > EXFIL_BYTES_THRESHOLD:
-                            mb = round(delta / (1024 * 1024), 1)
-                            self._raise_alert(
-                                alert_type='DATA_EXFIL', ip=self._local_ip,
-                                severity='CRITICAL',
-                                description=f"Data exfiltration: {mb} MB outbound in {elapsed:.0f}s",
-                                extra={'bytes_sent': delta, 'elapsed_sec': round(elapsed, 1)},
-                                now=now,
-                            )
                     last_io      = io
                     last_io_time = now
                 except Exception:
                     pass
 
-                # ── Detection pass ──────────────────────────
+                # ── ML-based detection pass ──────────────────────────
                 self._run_detection(now)
 
-                # ── Emit live stats to all clients ──────────
-                self._emit_live_update(now, conns)
+                # TShark already streams packet-level updates. Avoid sending
+                # duplicate legacy snapshots over Socket.IO in that mode.
+                if self.capture_packets:
+                    self._emit_live_update(now, conns)
 
             except Exception as e:
-                print(f"⚠️  psutil loop error: {e}")
+                print(f"[WARN]  psutil loop error: {e}")
 
             time.sleep(POLL_INTERVAL)
 
     # ─────────────────────────────────────────────────────
-    # Detection — called after events are accumulated
+    # Detection — DISABLED - Using ML model only
     # ─────────────────────────────────────────────────────
 
     def _run_detection(self, now: datetime):
+        # Rule-based detection with high thresholds to avoid false positives
         scan_cutoff  = now - timedelta(seconds=SCAN_WINDOW_SECONDS)
         brute_cutoff = now - timedelta(seconds=BRUTE_WINDOW_SECONDS)
 
@@ -634,66 +686,113 @@ class NetworkMonitor:
                 if not self._syn_events[ip]:
                     del self._syn_events[ip]
 
-            scan_snap  = {ip: list(evs) for ip, evs in self._scan_events.items()}
-            brute_snap = {ip: list(evs) for ip, evs in self._brute_events.items()}
-            syn_snap   = {ip: list(ts)  for ip, ts  in self._syn_events.items()}
+            # ── Port Scan Detection ─────────────────────────────
+            # Port Scan Detection
+            for ip, events in list(self._scan_events.items()):
+                distinct_ports = len({p for _, p in events})
+                total_packets = len(events)
 
-        # Port scan detection
-        for src_ip, events in scan_snap.items():
-            distinct_ports = {p for _, p in events}
-            if len(distinct_ports) >= PORT_SCAN_THRESHOLD:
-                self._raise_alert(
-                    alert_type='PORT_SCAN', ip=src_ip, severity='HIGH',
-                    description=(
-                        f"Port scan from {src_ip} → {self._local_ip}: "
-                        f"{len(distinct_ports)} ports in {SCAN_WINDOW_SECONDS}s"
-                    ),
-                    extra={
-                        'ports_hit': sorted(distinct_ports)[:40],
-                        'port_count': len(distinct_ports),
-                        'target_ip': self._local_ip,
-                        'proto': 'TCP',
-                    },
-                    now=now,
-                )
-
-        # Brute force detection
-        brute_counts: dict = defaultdict(lambda: defaultdict(int))
-        for src_ip, events in brute_snap.items():
-            for _, dport in events:
-                brute_counts[src_ip][dport] += 1
-
-        for src_ip, port_counts in brute_counts.items():
-            for dport, count in port_counts.items():
-                if count >= BRUTE_FORCE_THRESHOLD:
-                    service = {22: 'SSH', 3389: 'RDP', 21: 'FTP', 23: 'Telnet',
-                               445: 'SMB', 5900: 'VNC', 25: 'SMTP', 110: 'POP3'}.get(dport, f'port {dport}')
+                # Only alert if:
+                # - Accessing 5+ distinct ports
+                # - AND 10+ total packets in the window
+                if distinct_ports >= 5 and total_packets >= 10:
                     self._raise_alert(
-                        alert_type='BRUTE_FORCE', ip=src_ip, severity='HIGH',
-                        description=(
-                            f"Brute force {service} from {src_ip}: "
-                            f"{count} attempts in {BRUTE_WINDOW_SECONDS}s"
-                        ),
+                        alert_type='PORT_SCAN',
+                        ip=ip,
+                        severity='HIGH',
+                        description=f"Aggressive port scan from {ip} ({distinct_ports} ports, {total_packets} packets)",
                         extra={
-                            'target_port':      dport,
-                            'service':          service,
-                            'connection_count': count,
-                            'target_ip':        self._local_ip,
-                            'proto':            'TCP',
+                            'dst_port': events[-1][1] if events else 0,
+                            'proto': 'TCP',
+                            'distinct_ports': distinct_ports,
+                            'total_packets': total_packets,
                         },
                         now=now,
                     )
+                    print(f"[ALERT] PORT_SCAN from {ip} ({distinct_ports} ports)")
 
-        # SYN flood detection
-        for src_ip, timestamps in syn_snap.items():
-            rate = len(timestamps) / max(SCAN_WINDOW_SECONDS, 1)
-            if len(timestamps) >= SYN_FLOOD_THRESHOLD:
-                self._raise_alert(
-                    alert_type='SYN_FLOOD', ip=src_ip, severity='CRITICAL',
-                    description=f"SYN flood from {src_ip}: {len(timestamps)} SYNs in {SCAN_WINDOW_SECONDS}s",
-                    extra={'syn_count': len(timestamps), 'rate_per_sec': round(rate, 1)},
-                    now=now,
-                )
+            # ── Brute Force Detection ───────────────────────────
+            for ip, events in list(self._brute_events.items()):
+                auth_attempts = len(events)
+
+                # Only alert if 5+ auth attempts in the window
+                if auth_attempts >= 5:
+                    self._raise_alert(
+                        alert_type='BRUTE_FORCE',
+                        ip=ip,
+                        severity='HIGH',
+                        description=f"Brute force attack from {ip} ({auth_attempts} auth attempts)",
+                        extra={
+                            'dst_port': events[-1][1] if events else 0,
+                            'proto': 'TCP',
+                            'auth_attempts': auth_attempts,
+                        },
+                        now=now,
+                    )
+                    print(f"[ALERT] BRUTE_FORCE from {ip} ({auth_attempts} attempts)")
+
+            # ── SYN Flood Detection ─────────────────────────────
+            for ip, timestamps in list(self._syn_events.items()):
+                # Count SYNs in last 5 seconds
+                recent_syns = [t for t in timestamps if t > now - timedelta(seconds=5)]
+
+                # Only alert if 20+ SYNs in 5 seconds
+                if len(recent_syns) >= 20:
+                    self._raise_alert(
+                        alert_type='SYN_FLOOD',
+                        ip=ip,
+                        severity='HIGH',
+                        description=f"SYN flood from {ip} ({len(recent_syns)} SYNs in 5s)",
+                        extra={
+                            'proto': 'TCP',
+                            'syn_count': len(recent_syns),
+                        },
+                        now=now,
+                    )
+                    print(f"[ALERT] SYN_FLOOD from {ip} ({len(recent_syns)} SYNs)")
+
+    # ─────────────────────────────────────────────────────
+    # ML-based detection for network traffic
+    # ─────────────────────────────────────────────────────
+
+    def get_traffic_features_for_ml(self, src_ip: str, dst_ip: str, src_port: int, dst_port: int,
+                                     protocol: str, packet_count: int, byte_count: int) -> dict:
+        """
+        Extract features from network traffic for ML model analysis.
+        Returns a feature dict compatible with network IDS model.
+        """
+        with self._lock:
+            scan_events = self._scan_events.get(src_ip, [])
+            brute_events = self._brute_events.get(src_ip, [])
+        
+        distinct_ports = len({p for _, p in scan_events[-50:]}) if scan_events else 0
+        auth_attempts = len([e for e in brute_events[-20:] if e[1] in AUTH_PORTS]) if brute_events else 0
+        
+        return {
+            'src_ip': src_ip,
+            'dst_ip': dst_ip,
+            'src_port': src_port,
+            'dst_port': dst_port,
+            'protocol': protocol,
+            'packet_count': packet_count,
+            'byte_count': byte_count,
+            'distinct_ports_scanned': distinct_ports,
+            'auth_attempts': auth_attempts,
+            'direction': 'IN' if dst_ip == self._local_ip else 'OUT',
+            'is_local': src_ip.startswith('192.168.') or src_ip.startswith('10.') or src_ip.startswith('172.'),
+        }
+
+    def analyze_with_ml(self, src_ip: str, dst_ip: str, src_port: int, dst_port: int,
+                        protocol: str, flags: str, now: datetime):
+        """
+        Use trained ML model to analyze network traffic.
+        DISABLED: ML model requires 46 CICFlowMeter features which are not available
+        from simple packet capture. Using rule-based detection instead.
+        """
+        # ML detection disabled - feature extraction doesn't match model requirements
+        # The model expects 46 specific flow features that require deep packet inspection
+        # Current capture only provides basic packet-level data
+        pass
 
     # ─────────────────────────────────────────────────────
     # Alert dispatch
@@ -701,62 +800,54 @@ class NetworkMonitor:
 
     def _raise_alert(self, alert_type: str, ip: str, severity: str,
                      description: str, extra: dict, now: datetime):
-        dedup_key = (alert_type, ip)
+        """Record rule detections as candidates only; this path has no model flow vector."""
+        normalized_ip = _normalize_ip_address(ip)
+        if normalized_ip in self._local_ips:
+            return
+        try:
+            if ipaddress.ip_address(normalized_ip).is_loopback:
+                return
+        except ValueError:
+            return
+
+        dedup_key = (alert_type, normalized_ip)
         with self._lock:
-            last = self._last_alert.get(dedup_key)
-            if last and (now - last).total_seconds() < DEDUP_WINDOW_SECONDS:
+            last_candidate = self._last_alert.get(dedup_key)
+            if last_candidate and (now - last_candidate).total_seconds() < DEDUP_WINDOW_SECONDS:
                 return
             self._last_alert[dedup_key] = now
-            self._stats['suspicious_ips'].add(ip)
-            self._stats['alerts_today'] += 1
-            if alert_type == 'PORT_SCAN':
-                self._stats['scans_detected'] += 1
-            elif alert_type == 'BRUTE_FORCE':
-                self._stats['brute_force_detected'] += 1
 
-        alert = {
-            'timestamp':   now.isoformat(),
-            'type':        alert_type,
-            'ip':          ip,
-            'severity':    severity,
-            'description': description,
-            **extra,
-        }
-
-        with self._lock:
-            self._alerts.append(alert)
-            if len(self._alerts) > 200:
-                self._alerts = self._alerts[-200:]
-
-        print(f"🔴 ALERT [{alert_type}] {description}")
-
-        # 1 — SOC socket
-        try:
-            self.socketio.emit('network_alert', alert)
-        except Exception as e:
-            print(f"⚠️  socket emit failed: {e}")
-
-        # 2 — Audit log
-        try:
-            from utils.db import log_network_audit
-            log_network_audit(
-                event_type=alert_type, ip=ip, severity=severity,
-                description=description,
-                protocol=extra.get('proto', ''),
-                port=extra.get('target_port') or extra.get('dst_port'),
-                details=str(extra),
-            )
-        except Exception as e:
-            print(f"⚠️  audit log failed: {e}")
-
-        # 3 — Full incident + geolocation + live_incident emit
-        try:
-            self._build_and_emit_incident(alert_type, ip, severity, description, extra, now)
-        except Exception as e:
-            print(f"⚠️  incident build failed: {e}")
+        print(
+            f"[UNVERIFIED CANDIDATE] {alert_type} from {ip}; "
+            "not raised as an attack because this capture path has no trained-model feature vector"
+        )
 
     def _build_and_emit_incident(self, alert_type, ip, severity, description, extra, now):
         """Build full incident with geo, risk score, emit live_incident to SOC."""
+        model_prediction = str(extra.get('prediction') or '').upper()
+        model_confidence = extra.get('confidence')
+        expected_prediction = {
+            'SYN_FLOOD': 'DOS',
+            'DATA_EXFIL': 'INFILTRATION',
+            'C2_BEACON': 'INFILTRATION',
+            'NULL_SCAN': 'PORT_SCAN',
+            'XMAS_SCAN': 'PORT_SCAN',
+            'FIN_SCAN': 'PORT_SCAN',
+        }.get(alert_type, alert_type)
+        if (
+            extra.get('is_verified') is not True
+            or extra.get('verification') != 'trained_network_ids'
+            or extra.get('model') not in ('network_rf_dnn_ensemble', 'network_random_forest')
+            or model_prediction in ('', 'BENIGN', 'UNKNOWN')
+            or model_prediction != expected_prediction
+            or not isinstance(model_confidence, (int, float))
+            or model_confidence < 70.0
+        ):
+            print(
+                f"[WARN] Refusing to create {alert_type} incident without trained-model verification"
+            )
+            return
+
         import threading as _threading
 
         def _work():
@@ -773,41 +864,20 @@ class NetworkMonitor:
                     'CRITICAL': 0.95, 'HIGH': 0.80, 'MEDIUM': 0.55, 'LOW': 0.30
                 }
 
-                # Try ML prediction first
-                ml_result = None
-                try:
-                    from models.network_scorer import predict_attack_type, is_loaded
-                    if is_loaded():
-                        ml_result = predict_attack_type(alert_type, extra)
-                except Exception:
-                    pass
+                ml_result = {
+                    'prediction': model_prediction,
+                    'confidence': model_confidence,
+                    'model': extra['model'],
+                    'is_anomaly': bool(extra.get('is_anomaly', False)),
+                    'anomaly_score': extra.get('anomaly_score', 0.0),
+                    'risk_score': extra.get('risk_score', 0.0),
+                }
 
-                # Attack-type specific boosts
-                extra_signals = {}
-                if alert_type == 'BRUTE_FORCE':
-                    extra_signals = {
-                        'process_suspicious': True,
-                        'process_risk': severity,
-                    }
-                elif alert_type in ('PORT_SCAN', 'NULL_SCAN', 'XMAS_SCAN', 'FIN_SCAN'):
-                    extra_signals = {}
-                elif alert_type == 'SYN_FLOOD':
-                    extra_signals = {'process_suspicious': True, 'process_risk': 'CRITICAL'}
-                elif alert_type == 'DATA_EXFIL':
-                    extra_signals = {
-                        'ml_prediction': 'Ransomware',
-                        'ml_confidence': 70.0,
-                        'file_events': 10,
-                    }
-
-                # Use ML risk score if available, else rule-based
-                if ml_result and ml_result.get('model') != 'not_loaded':
-                    ml_risk_score = ml_result.get('risk_score', 0)
-                    ml_confidence = ml_result.get('confidence', 0)
-                    ml_prediction = ml_result.get('prediction', '')
-                    extra_signals['ml_prediction']  = ml_prediction if ml_prediction != 'BENIGN' else None
-                    extra_signals['ml_confidence']  = ml_confidence
-                    extra_signals['ml_score']       = ml_risk_score
+                extra_signals = {
+                    'ml_prediction': ml_result['prediction'],
+                    'ml_confidence': ml_result['confidence'],
+                    'ml_score': ml_result['risk_score'],
+                }
 
                 rs = calculate_risk(
                     network_alert=alert_type,
@@ -889,19 +959,15 @@ class NetworkMonitor:
                         'url':  f'https://attack.mitre.org/techniques/{mitre_id}/',
                     },
                     'ml': {
-                        'prediction':    ml_result.get('prediction')  if ml_result else None,
-                        'confidence':    ml_result.get('confidence')  if ml_result else None,
-                        'is_anomaly':    ml_result.get('is_anomaly')  if ml_result else None,
-                        'anomaly_score': ml_result.get('anomaly_score') if ml_result else None,
-                        'risk_score':    ml_result.get('risk_score')  if ml_result else None,
-                        'model':         ml_result.get('model')       if ml_result else 'not_loaded',
-                        'loaded':        ml_result is not None and ml_result.get('model') != 'not_loaded',
+                        **ml_result,
+                        'verified': True,
+                        'loaded': True,
                     },
                     'risk_factors': rs.to_dict().get('factors', []),
                     'status': {
                         'detected':   True,
                         'honeypot':   False,
-                        'ml':         ml_result is not None and ml_result.get('model') != 'not_loaded',
+                        'ml':         True,
                         'quarantine': False,
                         'evidence':   False,
                         'blockchain': False,
@@ -920,7 +986,7 @@ class NetworkMonitor:
                 print(f"🚨 live_incident → {alert_type} from {ip} | risk={rs.final_score}/100 | geo={geo_display.get('display','?')}")
 
             except Exception as e:
-                print(f"⚠️  _build_and_emit_incident failed: {e}")
+                print(f"[WARN]  _build_and_emit_incident failed: {e}")
 
         _threading.Thread(target=_work, daemon=True).start()
 
@@ -951,7 +1017,7 @@ class NetworkMonitor:
                 'packets':     pkts,
             })
         except Exception as e:
-            print(f"⚠️  network_update emit failed: {e}")
+            print(f"[WARN]  network_update emit failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────

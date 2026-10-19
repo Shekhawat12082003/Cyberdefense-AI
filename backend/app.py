@@ -1,11 +1,21 @@
 import os
+import sys
 import json
 import hashlib
+import ipaddress
 import sqlite3
 import threading
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+import numpy as np
+
+# Fix Windows console encoding for emoji support
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).parent / '.env')
@@ -24,7 +34,15 @@ app = Flask(__name__)
 app.config['SECRET_KEY']       = os.getenv('SECRET_KEY', 'cyberdefense-secret')
 app.config['THREAT_THRESHOLD'] = 70
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=False,
+    allow_upgrades=False,
+    ping_interval=25,
+    ping_timeout=60,
+)
 
 init_db()
 
@@ -34,7 +52,7 @@ try:
     from flask_limiter.util import get_remote_address
     limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
     LIMITER_AVAILABLE = True
-    print("✅ Rate limiter ready")
+    print("[OK] Rate limiter ready")
 except Exception:
     limiter = None
     LIMITER_AVAILABLE = False
@@ -111,13 +129,13 @@ try:
     from utils.blockchain_logger import log_threat as blockchain_log
     from utils.blockchain_logger import verify_hash as blockchain_verify_hash
     from utils.blockchain_logger import get_all_logs as blockchain_get_logs
-    print(f"⛓  Blockchain mode : {bc_logger.mode}")
+    print(f"[CHAIN] Blockchain mode : {bc_logger.mode}")
     if bc_logger.mode == 'core_testnet2':
-        print(f"✅ Blockchain ready : {os.getenv('CONTRACT_ADDRESS')}")
+        print(f"[OK] Blockchain ready : {os.getenv('CONTRACT_ADDRESS')}")
     else:
-        print(f"ℹ️  Blockchain      : local simulation")
+        print(f"[INFO] Blockchain      : local simulation")
 except Exception as e:
-    print(f"⚠️  Blockchain init failed: {e}")
+    print(f"[WARN] Blockchain init failed: {e}")
     bc_logger              = None
     blockchain_log         = None
     blockchain_verify_hash = None
@@ -127,12 +145,12 @@ except Exception as e:
 try:
     from utils.email_alerts import send_high_threat_alert, send_system_startup_email
     EMAIL_AVAILABLE = True
-    print("✅ Email alerts ready")
+    print("[OK] Email alerts ready")
 except Exception as e:
     EMAIL_AVAILABLE           = False
     send_high_threat_alert    = None
     send_system_startup_email = None
-    print(f"⚠️  Email init failed: {e}")
+    print(f"[WARN] Email init failed: {e}")
 
 if EMAIL_AVAILABLE and send_system_startup_email:
     threading.Thread(target=send_system_startup_email, daemon=True).start()
@@ -284,7 +302,7 @@ def predict_route():
             }
             print(f"⛓  Blockchain logged — mode: {bc_result.get('mode')}")
         except Exception as e:
-            print(f"⚠️  Blockchain log failed: {e}")
+            print(f"[WARN] Blockchain log failed: {e}")
 
     threshold = app.config.get('THREAT_THRESHOLD', 70)
     if result['threat_score'] > 30:  # generate AI summary for MEDIUM and HIGH
@@ -331,7 +349,7 @@ def predict_route():
                     summary = ai_chat(prompt, context={}, history=[])
                     update_threat_summary(tid, summary)
                 except Exception as ex:
-                    print(f"⚠️  AI summary failed: {ex}")
+                    print(f"[WARN] AI summary failed: {ex}")
             threading.Thread(target=_gen_summary, args=(threat_id, full_data), daemon=True).start()
 
     return jsonify(result)
@@ -477,6 +495,79 @@ def health():
     })
 
 
+@app.route('/api/system/health', methods=['GET'])
+def system_health():
+    """Real component health check — no dummy values."""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    from models.network_monitor import get_monitor
+    from utils.honeypot import get_watcher_status
+
+    nm = get_monitor()
+    ws = get_watcher_status()
+
+    # ML model status — check if scorer models are loaded
+    ml_loaded = False
+    ml_detail = 'Not loaded'
+    try:
+        from models.network_scorer import get_scorer_info
+        info = get_scorer_info()
+        ml_loaded = info.get('loaded', False)
+        ml_detail = info.get('detail', 'Unknown')
+    except Exception as _e:
+        ml_detail = str(_e)
+
+    # File monitor — check if the daemon thread is alive
+    import sys as _sys
+    _mod = _sys.modules[__name__] if __name__ in _sys.modules else None
+    fm_thread = globals().get('monitor_thread')
+    fm_alive = fm_thread.is_alive() if fm_thread else False
+
+    # Network monitor
+    nm_mode   = (nm.capture_mode if nm else 'unavailable') if nm else 'unavailable'
+    nm_online = nm is not None
+
+    # DB check
+    db_ok = False
+    try:
+        from utils.db import get_db
+        conn = get_db()
+        conn.execute('SELECT 1')
+        db_ok = True
+    except Exception:
+        pass
+
+    # WebSocket — socketio is always running if app started
+    ws_ok = True
+
+    # Blockchain
+    bc_ok   = bc_logger is not None
+    bc_mode = bc_logger.mode if bc_logger else 'unavailable'
+
+    # IP intel APIs — check .env keys presence (not actual network call)
+    abuseipdb_ok  = bool(os.getenv('ABUSEIPDB_KEY', ''))
+    shodan_ok     = bool(os.getenv('SHODAN_KEY', ''))
+    virustotal_ok = bool(os.getenv('VIRUSTOTAL_KEY', ''))
+
+    return jsonify({
+        'timestamp': datetime.utcnow().isoformat(),
+        'components': {
+            'database':        {'ok': db_ok,      'detail': 'SQLite connected' if db_ok else 'Error'},
+            'ml_model':        {'ok': ml_loaded,   'detail': ml_detail},
+            'file_monitor':    {'ok': fm_alive,    'detail': 'Watching' if fm_alive else 'Thread not running'},
+            'network_monitor': {'ok': nm_online,   'detail': nm_mode},
+            'honeypot':        {'ok': ws['active'], 'detail': f"Watcher {'active' if ws['active'] else 'inactive'} — {ws.get('trigger_count', 0)} triggers"},
+            'blockchain':      {'ok': bc_ok,       'detail': bc_mode},
+            'websocket':       {'ok': ws_ok,       'detail': 'Running'},
+            'abuseipdb':       {'ok': abuseipdb_ok,'detail': 'Key configured' if abuseipdb_ok else 'No API key'},
+            'shodan':          {'ok': shodan_ok,   'detail': 'Key configured' if shodan_ok else 'No API key'},
+            'virustotal':      {'ok': virustotal_ok,'detail': 'Key configured' if virustotal_ok else 'No API key'},
+        }
+    })
+
+
 # ═════════════════════════════════════════════════════════
 # PDF REPORT
 # ═════════════════════════════════════════════════════════
@@ -604,26 +695,7 @@ def email_test():
     user = verify_token(request)
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
-    if not EMAIL_AVAILABLE or not send_high_threat_alert:
-        return jsonify({'error': 'Email not configured'}), 503
-    test_data = {
-        'threat_score':  99.0,
-        'prediction':    'Ransomware',
-        'risk_level':    'HIGH',
-        'timestamp':     datetime.utcnow().isoformat(),
-        'file_name':     'test_malware.dll',
-        'hash':          'abc123def456test',
-        'top_features':  ['BitcoinAddresses=1', 'DllCharacteristics=0', 'NumberOfSections=6'],
-        'ml_confidence': 99.0,
-        'dl_confidence': 98.0,
-        'blockchain':    {'mode': 'test', 'block': 999999, 'explorer': None}
-    }
-    threading.Thread(
-        target=send_high_threat_alert,
-        args=(test_data,),
-        daemon=True
-    ).start()
-    return jsonify({'status': 'Test email sent!'})
+    return jsonify({'error': 'Email test disabled - only real threat alerts are sent'}), 403
 
 
 # ═════════════════════════════════════════════════════════
@@ -717,7 +789,7 @@ def admin_clear_quarantine():
                     pass
     admin = verify_token(request)
     log_audit(admin.get('username') if admin else 'admin', 'QUARANTINE_CLEARED', f'{cleared} files removed')
-    print(f"🗑️  Quarantine cleared: {cleared} files")
+    print(f"[QUARANTINE] Cleared: {cleared} files")
     return jsonify({'status': f'Cleared {cleared} files'})
 
 
@@ -759,10 +831,21 @@ def admin_clear_threats():
         conn.close()
         admin = verify_token(request)
         log_audit(admin.get('username') if admin else 'admin', 'THREATS_CLEARED', 'All threat records deleted')
-        print("🗑️  Threat database cleared")
+        print("[DB] Threat database cleared")
         return jsonify({'status': 'Threat database cleared'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/settings', methods=['GET'])
+def admin_get_settings():
+    if not admin_only(request):
+        return jsonify({'error': 'Admin only'}), 403
+    return jsonify({
+        'threat_threshold': app.config.get('THREAT_THRESHOLD', 70),
+        'blockchain_mode':  bc_logger.mode if bc_logger else 'unavailable',
+        'email_enabled':    EMAIL_AVAILABLE,
+    })
 
 
 @app.route('/api/admin/settings', methods=['POST'])
@@ -775,7 +858,7 @@ def admin_update_settings():
         app.config['THREAT_THRESHOLD'] = int(threshold)
         admin = verify_token(request)
         log_audit(admin.get('username') if admin else 'admin', 'SETTINGS_CHANGED', f'threshold={threshold}')
-        print(f"⚙️  Threat threshold updated: {threshold}")
+        print(f"[CONFIG] Threat threshold updated: {threshold}")
     return jsonify({
         'status':    'Settings updated',
         'threshold': app.config.get('THREAT_THRESHOLD', 70)
@@ -853,27 +936,6 @@ def chat_route():
         return jsonify({'reply': reply})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-
-# ═════════════════════════════════════════════════════════
-# TEST ALERT
-# ═════════════════════════════════════════════════════════
-
-@app.route('/api/test-alert', methods=['POST'])
-def test_alert():
-    user = verify_token(request)
-    if not user:
-        return jsonify({'error': 'Unauthorized'}), 401
-    socketio.emit('high_threat_alert', {
-        'prediction':   'Ransomware',
-        'threat_score': 95.0,
-        'risk_level':   'HIGH',
-        'timestamp':    datetime.utcnow().isoformat()
-    })
-    print("🚨 Test alert emitted!")
-    return jsonify({'status': 'alert sent'})
-
-
 # ═════════════════════════════════════════════════════════
 # WEBSOCKET
 # ═════════════════════════════════════════════════════════
@@ -881,12 +943,12 @@ def test_alert():
 @socketio.on('connect')
 def on_connect():
     emit('connected', {'message': '🛡️ CyberDefense SOC connected'})
-    print("✅ Client connected via WebSocket")
+    print("[WS] Client connected via WebSocket")
 
 
 @socketio.on('disconnect')
 def on_disconnect():
-    print("⚠️  Client disconnected")
+    print("[WS] Client disconnected")
 
 
 # ═════════════════════════════════════════════════════════
@@ -899,38 +961,490 @@ def start_file_monitor():
         from watchdog.observers import Observer
         from models.file_monitor import ThreatHandler, WATCHED_DIR, reset_token
         os.makedirs(WATCHED_DIR, exist_ok=True)
-        print(f"👁️  File monitor waiting for server...")
+        print(f"[FILE MONITOR] Waiting for server...")
         time.sleep(3)
         reset_token()
         handler  = ThreatHandler()
         observer = Observer()
         observer.schedule(handler, WATCHED_DIR, recursive=False)
         observer.start()
-        print(f"👁️  File monitor started: {WATCHED_DIR}")
+        print(f"[FILE MONITOR] Started: {WATCHED_DIR}")
         # Scan files that were already in watched/ before the monitor started
         from models.file_monitor import scan_existing_files
         scan_existing_files()
         while True:
             time.sleep(1)
     except Exception as e:
-        print(f"⚠️  File monitor failed: {e}")
+        print(f"[WARN] File monitor failed: {e}")
 
 monitor_thread = threading.Thread(target=start_file_monitor, daemon=True)
 monitor_thread.start()
 
 
 # ═════════════════════════════════════════════════════════
-# NETWORK MONITOR
+# REAL-TIME TSHARK CAPTURE
+# ═════════════════════════════════════════════════════════
+
+# Global instances
+_tshark_capture = None
+_flow_extractor = None
+_ml_predictor = None
+_live_flows = []
+_live_alerts = []
+_attackers = {}
+_live_packets = []
+_first_packet_epoch = None
+_verified_alert_last_seen = {}
+_verified_alert_lock = threading.Lock()
+
+
+def _normalize_ip_address(address):
+    """Normalize IP literals for matching, excluding IPv6 interface scopes."""
+    if not address:
+        return ''
+    value = str(address).split('%', 1)[0]
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return value
+
+
+def init_realtime_capture():
+    """Initialize real-time capture components"""
+    global _tshark_capture, _flow_extractor
+    
+    try:
+        from utils.tshark_capture import TSharkCapture
+        from utils.flow_extractor import FlowExtractor
+        from models.network_scorer import predict_flow, get_status
+        
+        _tshark_capture = TSharkCapture(socketio)
+        _flow_extractor = FlowExtractor()
+        model_status = get_status()
+        if model_status.get('network_ids_loaded'):
+            print("[OK] Trained network IDS loaded for real-time verification")
+        else:
+            print("[WARN] Trained network IDS unavailable; flow alerts will not be confirmed")
+        
+        # Start flow extractor with callback
+        def on_flow_complete(features, flow):
+            """Callback when a flow is complete"""
+            global _live_flows, _live_alerts, _attackers
+            
+            # Get ML prediction
+            prediction = predict_flow(features)
+            model_name = prediction.get('model', 'not_loaded')
+            confidence = float(prediction.get('confidence') or 0)
+            predicted_class = str(prediction.get('prediction') or 'UNKNOWN').upper()
+            is_model_available = (
+                model_name in ('network_rf_dnn_ensemble', 'network_random_forest')
+                and prediction.get('verified') is True
+                and predicted_class != 'UNKNOWN'
+            )
+            is_attack = (
+                is_model_available
+                and prediction.get('verified') is True
+                and prediction.get('is_attack') is True
+                and predicted_class != 'BENIGN'
+                and confidence >= 70.0
+            )
+            
+            # Create flow record (convert numpy types to native Python types)
+            flow_record = {
+                'src_ip': flow.src_ip,
+                'dst_ip': flow.dst_ip,
+                'src_port': int(flow.src_port),
+                'dst_port': int(flow.dst_port),
+                'protocol': flow.protocol,
+                'packets': int(flow.total_packets),
+                'bytes': int(flow.total_bytes),
+                'duration': float((flow.last_seen - flow.first_seen).total_seconds()),
+                'prediction': predicted_class,
+                'confidence': confidence,
+                'is_anomaly': bool(prediction.get('is_anomaly', False)),
+                'is_attack': is_attack,
+                'is_verified': prediction.get('verified') is True and is_model_available,
+                'model': model_name,
+                'verification_status': 'confirmed_attack' if is_attack else (
+                    'benign' if is_model_available and predicted_class == 'BENIGN' and confidence >= 70.0
+                    else 'unverified'
+                ),
+                'risk_score': float(prediction.get('risk_score', 0)),
+                'timestamp': flow.last_seen.isoformat(),
+            }
+            
+            # Add to live flows
+            _live_flows.append(flow_record)
+            if len(_live_flows) > 10000:
+                _live_flows = _live_flows[-10000:]
+            
+            # A flow is an attack only when the trained classifier confirms it.
+            if is_attack:
+                alert_key = (
+                    flow.src_ip, flow.dst_ip, int(flow.src_port), int(flow.dst_port),
+                    flow.protocol, predicted_class,
+                )
+                now = flow.last_seen
+                with _verified_alert_lock:
+                    previous_alert = _verified_alert_last_seen.get(alert_key)
+                    if previous_alert and (now - previous_alert).total_seconds() < 60:
+                        return
+                    _verified_alert_last_seen[alert_key] = now
+                    expired_alerts = [
+                        key for key, seen_at in _verified_alert_last_seen.items()
+                        if (now - seen_at).total_seconds() >= 300
+                    ]
+                    for key in expired_alerts:
+                        _verified_alert_last_seen.pop(key, None)
+
+                alert_id = hashlib.sha256(
+                    f"{alert_key}:{now.isoformat()}".encode()
+                ).hexdigest()[:20]
+                alert = {
+                    'id': f'alert_{alert_id}',
+                    'attack_type': predicted_class,
+                    'severity': 'HIGH' if confidence >= 85 else 'MEDIUM',
+                    'attacker_ip': flow.src_ip,
+                    'target_ip': flow.dst_ip,
+                    'src_port': int(flow.src_port),
+                    'dst_port': int(flow.dst_port),
+                    'protocol': flow.protocol,
+                    'timestamp': flow.last_seen.isoformat(),
+                    'confidence': confidence,
+                    'risk_score': float(prediction.get('risk_score', 0)),
+                    'model': model_name,
+                    'is_verified': True,
+                    'verification': 'trained_network_ids',
+                    'verification_status': 'confirmed_attack',
+                    'prediction': predicted_class,
+                    'features': {k: float(v) if isinstance(v, (int, float, np.number)) else v for k, v in features.items()},
+                }
+                
+                _live_alerts.append(alert)
+                if len(_live_alerts) > 1000:
+                    _live_alerts = _live_alerts[-1000:]
+                
+                # Track attacker
+                attacker_key = flow.src_ip
+                if attacker_key not in _attackers:
+                    _attackers[attacker_key] = {
+                        'ip': flow.src_ip,
+                        'first_seen': flow.first_seen.isoformat(),
+                        'last_seen': flow.last_seen.isoformat(),
+                        'attempts': 0,
+                        'packets': 0,
+                        'flows': 0,
+                        'attack_types': set(),
+                        'risk_score': 0,
+                    }
+                
+                _attackers[attacker_key]['last_seen'] = flow.last_seen.isoformat()
+                _attackers[attacker_key]['attempts'] += 1
+                _attackers[attacker_key]['packets'] += flow.total_packets
+                _attackers[attacker_key]['flows'] += 1
+                _attackers[attacker_key]['attack_types'].add(predicted_class)
+                _attackers[attacker_key]['risk_score'] = max(
+                    _attackers[attacker_key]['risk_score'],
+                    prediction.get('risk_score', 0)
+                )
+                
+                # Emit via WebSocket
+                socketio.emit('alert_created', alert)
+                socketio.emit('network_alert', {
+                    **alert,
+                    'type': predicted_class,
+                    'ip': flow.src_ip,
+                    'src_ip': flow.src_ip,
+                    'timestamp': flow.last_seen.isoformat(),
+                    'description': (
+                        f"Trained network IDS classified {predicted_class} "
+                        f"with {confidence:.1f}% confidence"
+                    ),
+                })
+                socketio.emit('attacker_update', {
+                    'ip': flow.src_ip,
+                    'attack_type': predicted_class,
+                    'risk_score': prediction.get('risk_score'),
+                })
+                
+                print(
+                    f"[ML VERIFIED] {predicted_class} ({confidence:.1f}%) "
+                    f"from {flow.src_ip} -> {flow.dst_ip}"
+                )
+            
+        _flow_extractor.start(on_flow_complete)
+        
+        # Packet callback for TShark
+        packet_batch = []
+        packet_batch_lock = threading.Lock()
+        last_packet_emit = [0.0]
+        max_pending_packets = 500
+
+        def on_packet(packet):
+            """Callback for each captured packet"""
+            global _live_packets, _first_packet_epoch
+            _flow_extractor.add_packet(packet)
+            epoch = packet.get('frame.time_epoch')
+            if epoch and _first_packet_epoch is None:
+                _first_packet_epoch = epoch
+            protocol = packet.get('_ws.col.Protocol') or (
+                'DNS' if packet.get('dns.qry.name') else
+                'QUIC' if packet.get('quic.long.packet_type') else
+                'TLS' if packet.get('tls.record.content_type') else
+                'TCP' if packet.get('tcp.srcport') else
+                ('UDP' if packet.get('udp.srcport') else packet.get('ip.proto', 'IP'))
+            )
+            info = packet.get('_ws.col.Info', '')
+            if not info:
+                if packet.get('dns.qry.name'):
+                    info = f"Standard query {packet['dns.qry.name']}"
+                elif packet.get('quic.long.packet_type'):
+                    info = f"QUIC packet type {packet['quic.long.packet_type']}"
+                elif packet.get('tcp.flags'):
+                    info = f"Flags 0x{packet['tcp.flags']}"
+                elif packet.get('tls.record.content_type'):
+                    info = 'Application Data'
+            packet_data = {
+                'number': packet.get('frame.number', ''),
+                'time': datetime.utcfromtimestamp(packet.get('frame.time_epoch', 0)).isoformat()
+                    if packet.get('frame.time_epoch') else datetime.utcnow().isoformat(),
+                'relative_time': round(epoch - _first_packet_epoch, 6)
+                    if epoch and _first_packet_epoch is not None else 0,
+                'src_ip': packet.get('ip.src') or packet.get('ipv6.src', ''),
+                'dst_ip': packet.get('ip.dst') or packet.get('ipv6.dst', ''),
+                'src_port': packet.get('tcp.srcport') or packet.get('udp.srcport', ''),
+                'dst_port': packet.get('tcp.dstport') or packet.get('udp.dstport', ''),
+                'protocol': protocol,
+                'length': packet.get('frame.len', 0),
+                'flags': packet.get('tcp.flags', ''),
+                'info': info,
+                'ttl': packet.get('ip.ttl', ''),
+                'direction': (
+                    'IN'
+                    if _normalize_ip_address(packet.get('ip.dst') or packet.get('ipv6.dst', ''))
+                    in _tshark_capture.local_ips
+                    else 'OUT'
+                ),
+            }
+            with packet_batch_lock:
+                _live_packets.append(packet_data)
+                if len(_live_packets) > 2000:
+                    _live_packets = _live_packets[-2000:]
+            now = time.monotonic()
+            with packet_batch_lock:
+                packet_batch.append(packet_data)
+                if len(packet_batch) > max_pending_packets:
+                    del packet_batch[:-max_pending_packets]
+                if now - last_packet_emit[0] < 0.5:
+                    return
+                packets = packet_batch[-100:]
+                packet_batch.clear()
+                last_packet_emit[0] = now
+
+            # Batch updates twice per second instead of opening a polling
+            # response for every packet.
+            socketio.emit('network_update', {
+                'stats': {
+                    'capture_mode': 'tshark',
+                    'packets_captured': _tshark_capture.packets_captured,
+                },
+                'packets': packets,
+            })
+        
+        _tshark_capture.packet_callback = on_packet
+
+        # Start packet capture automatically on the adapter that owns the
+        # backend's local IP. The user should not need to select an interface
+        # manually just to see live traffic on the SOC dashboard.
+        import psutil
+        from models.network_monitor import _get_local_ip
+        local_ip = _get_local_ip()
+        _tshark_capture.local_ip = local_ip
+        _tshark_capture.local_ips = {local_ip}
+        interfaces = _tshark_capture.get_interfaces()
+        interface_addresses = psutil.net_if_addrs()
+        local_addresses = {
+            _normalize_ip_address(getattr(address, 'address', ''))
+            for addresses in interface_addresses.values()
+            for address in addresses
+            if getattr(address, 'address', '')
+        }
+        local_addresses.discard('')
+        _tshark_capture.local_ips = local_addresses | {_normalize_ip_address(local_ip)}
+        interface = None
+        for item in interfaces:
+            for name, addresses in interface_addresses.items():
+                if name.lower() != item['name'].lower():
+                    continue
+                ips = {
+                    _normalize_ip_address(getattr(address, 'address', ''))
+                    for address in addresses
+                    if getattr(address, 'address', '')
+                }
+                if _normalize_ip_address(local_ip) in ips:
+                    interface = item['device']
+                    break
+            if interface:
+                break
+        if interface and _tshark_capture.start_capture(interface, on_packet):
+            print(f"[OK] Wireshark capture started automatically on {interface}")
+        else:
+            print("[WARN] Wireshark capture could not start automatically; use /api/capture/start")
+
+        print("[OK] Real-time capture initialized")
+        return True
+        
+    except Exception as e:
+        print(f"[WARN] Real-time capture init failed: {e}")
+        return False
+
+
+# Call initialization
+init_realtime_capture()
+
+
+@app.route('/api/interfaces', methods=['GET'])
+def get_interfaces():
+    """Get available network interfaces"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if _tshark_capture is None:
+        return jsonify({'interfaces': [], 'error': 'Capture not initialized'}), 500
+    
+    interfaces = _tshark_capture.get_interfaces()
+    return jsonify({'interfaces': interfaces})
+
+
+@app.route('/api/capture/start', methods=['POST'])
+def start_capture():
+    """Start live packet capture"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if _tshark_capture is None:
+        return jsonify({'error': 'Capture not initialized'}), 500
+    
+    data = request.get_json()
+    interface = data.get('interface')
+    filter_expr = data.get('filter', '')
+    
+    if not interface:
+        return jsonify({'error': 'Interface required'}), 400
+    
+    if _tshark_capture.start_capture(interface, _flow_extractor.add_packet, filter_expr):
+        socketio.emit('capture_status', {'status': 'started', 'interface': interface})
+        return jsonify({'status': 'started', 'interface': interface})
+    else:
+        return jsonify({'error': 'Failed to start capture'}), 500
+
+
+@app.route('/api/capture/stop', methods=['POST'])
+def stop_capture():
+    """Stop live packet capture"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if _tshark_capture is None:
+        return jsonify({'error': 'Capture not initialized'}), 500
+    
+    _tshark_capture.stop_capture()
+    socketio.emit('capture_status', {'status': 'stopped'})
+    return jsonify({'status': 'stopped'})
+
+
+@app.route('/api/capture/status', methods=['GET'])
+def capture_status():
+    """Get capture status"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if _tshark_capture is None:
+        return jsonify({'status': 'not_initialized'}), 500
+    
+    status = _tshark_capture.get_status()
+    status['active_flows'] = _flow_extractor.get_flow_count() if _flow_extractor else 0
+    return jsonify(status)
+
+
+@app.route('/api/flows', methods=['GET'])
+def get_flows():
+    """Get live network flows"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    limit = int(request.args.get('limit', 100))
+    return jsonify({'flows': _live_flows[-limit:], 'total': len(_live_flows)})
+
+
+@app.route('/api/alerts', methods=['GET'])
+def get_alerts():
+    """Get live alerts"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    limit = int(request.args.get('limit', 50))
+    return jsonify({'alerts': list(reversed(_live_alerts[-limit:])), 'total': len(_live_alerts)})
+
+
+@app.route('/api/attackers', methods=['GET'])
+def get_attackers():
+    """Get tracked attackers"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    attackers_list = []
+    for ip, data in _attackers.items():
+        attackers_list.append({
+            'ip': data['ip'],
+            'first_seen': data['first_seen'],
+            'last_seen': data['last_seen'],
+            'attempts': data['attempts'],
+            'packets': data['packets'],
+            'flows': data['flows'],
+            'attack_types': list(data['attack_types']),
+            'risk_score': data['risk_score'],
+        })
+    
+    return jsonify({'attackers': attackers_list, 'total': len(attackers_list)})
+
+
+@app.route('/api/system/status', methods=['GET'])
+def system_status():
+    """Get overall system status"""
+    if not verify_token(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    status = {
+        'capture': _tshark_capture.get_status() if _tshark_capture else {'is_capturing': False},
+        'ml_loaded': _ml_predictor.is_loaded if _ml_predictor else False,
+        'active_flows': _flow_extractor.get_flow_count() if _flow_extractor else 0,
+        'total_alerts': len(_live_alerts),
+        'total_attackers': len(_attackers),
+        'total_flows': len(_live_flows),
+    }
+    
+    return jsonify(status)
+
+
+# ═════════════════════════════════════════════════════════
+# NETWORK MONITOR (LEGACY - KEPT FOR COMPATIBILITY)
 # ═════════════════════════════════════════════════════════
 
 def start_network_monitor():
     try:
         from models.network_monitor import NetworkMonitor, set_monitor
-        nm = NetworkMonitor(socketio, blockchain_log, send_high_threat_alert)
+        tshark_active = _tshark_capture is not None and _tshark_capture.is_capturing
+        nm = NetworkMonitor(
+            socketio,
+            blockchain_log,
+            send_high_threat_alert,
+            capture_packets=not tshark_active,
+        )
         set_monitor(nm)
         nm.start()
     except Exception as e:
-        print(f"⚠️  Network monitor failed: {e}")
+        print(f"[WARN] Network monitor failed: {e}")
 
 network_thread = threading.Thread(target=start_network_monitor, daemon=True)
 network_thread.start()
@@ -955,13 +1469,40 @@ def network_stats():
         return jsonify({'error': 'Unauthorized'}), 401
     from models.network_monitor import get_monitor
     m = get_monitor()
-    if m is None:
-        return jsonify({'total_connections': 0, 'suspicious_ips': 0,
-                        'alerts_today': 0, 'bytes_sent_mb': 0,
-                        'capture_mode': 'unavailable', 'local_ip': '',
-                        'packets_captured': 0, 'scans_detected': 0,
-                        'brute_force_detected': 0})
-    return jsonify(m.get_stats())
+    stats = m.get_stats() if m is not None else {
+        'total_connections': 0, 'suspicious_ips': 0, 'alerts_today': 0,
+        'bytes_sent_mb': 0, 'capture_mode': 'unavailable', 'local_ip': '',
+        'packets_captured': 0, 'scans_detected': 0, 'brute_force_detected': 0,
+    }
+    verified_alerts = [
+        alert for alert in _live_alerts
+        if alert.get('is_verified') is True
+        and alert.get('verification') == 'trained_network_ids'
+    ]
+    today = datetime.utcnow().date().isoformat()
+    verified_today = [
+        alert for alert in verified_alerts
+        if str(alert.get('timestamp', '')).startswith(today)
+    ]
+    stats.update({
+        'alerts_today': len(verified_today),
+        'suspicious_ips': len({
+            alert.get('attacker_ip') for alert in verified_today
+            if alert.get('attacker_ip')
+        }),
+        'scans_detected': sum(
+            1 for alert in verified_today if alert.get('attack_type') == 'PORT_SCAN'
+        ),
+        'brute_force_detected': sum(
+            1 for alert in verified_today if alert.get('attack_type') == 'BRUTE_FORCE'
+        ),
+    })
+    # TShark is the packet-level source of truth. Do not expose the legacy
+    # psutil/raw-socket mode while the Wi-Fi capture is still running.
+    if _tshark_capture is not None and _tshark_capture.is_capturing:
+        stats['capture_mode'] = 'tshark'
+        stats['packets_captured'] = _tshark_capture.packets_captured
+    return jsonify(stats)
 
 
 @app.route('/api/network/alerts')
@@ -983,9 +1524,12 @@ def network_packets():
         return jsonify({'error': 'Unauthorized'}), 401
     from models.network_monitor import get_monitor
     m = get_monitor()
+    packets = list(_live_packets)
+    if packets:
+        return jsonify({'packets': list(reversed(packets[-250:])), 'source': 'tshark'})
     if m is None:
         return jsonify({'packets': [], 'error': 'Monitor not ready'})
-    return jsonify({'packets': m.get_packets()})
+    return jsonify({'packets': m.get_packets()[:250], 'source': 'network-monitor'})
 
 
 # ═════════════════════════════════════════════════════════
@@ -1253,9 +1797,14 @@ def honeypot_triggers():
     user = verify_token(request)
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
-    from utils.db import get_honeypot_triggers
+    from utils.db import get_honeypot_triggers, count_verified_honeypot_triggers_since
     limit = int(request.args.get('limit', 100))
-    return jsonify({'triggers': get_honeypot_triggers(limit)})
+    today_utc = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    triggers = get_honeypot_triggers(limit, verified_only=True)
+    return jsonify({
+        'triggers': triggers,
+        'verified_hits_today': count_verified_honeypot_triggers_since(today_utc),
+    })
 
 
 @app.route('/api/honeypot/status', methods=['GET'])
@@ -1360,8 +1909,10 @@ def lab_mode():
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
     if request.method == 'POST':
-        data = request.get_json()
-        _lab_mode = bool(data.get('enabled', False))
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get('enabled'), bool):
+            return jsonify({'error': 'enabled must be a boolean'}), 400
+        _lab_mode = data['enabled']
         log_audit(user.get('username'), 'LAB_MODE_CHANGED', f'enabled={_lab_mode}')
         return jsonify({'lab_mode': _lab_mode})
     return jsonify({'lab_mode': _lab_mode})
@@ -1372,31 +1923,47 @@ def lab_simulate():
     user = verify_token(request)
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
+    if not _lab_mode:
+        return jsonify({
+            'error': 'Enable simulation mode before starting a Cyber Range scenario'
+        }), 409
 
-    from utils.attack_director import run_simulation, get_active_scenario, get_scenario_status
-    data     = request.get_json()
-    sim_type = data.get('type', '').strip().lower()
+    data = request.get_json(silent=True)
+    simulation_type = data.get('type') if isinstance(data, dict) else None
+    if not isinstance(simulation_type, str):
+        return jsonify({'error': 'A simulation type is required'}), 400
 
-    if not sim_type:
-        return jsonify({'error': 'type is required'}), 400
+    from utils.attack_director import SIMULATION_MAP, get_active_scenario, run_simulation
+    if simulation_type not in SIMULATION_MAP:
+        return jsonify({
+            'error': 'Unknown simulation type',
+            'available_types': sorted(SIMULATION_MAP),
+        }), 400
+    active_scenario = get_active_scenario()
+    if active_scenario:
+        return jsonify({
+            'error': 'A simulation is already running',
+            'active_scenario': active_scenario,
+        }), 409
 
-    # Check both the live lock and the scenario status (covers fast-completing sims)
-    active = get_active_scenario()
-    if not active:
-        # Also check if any scenario is still marked RUNNING
-        statuses = get_scenario_status()
-        active = next((sid for sid, s in statuses.items()
-                       if s.get('status') == 'RUNNING'), None)
-
-    if active:
-        return jsonify({'error': f'Simulation already running: {active}'}), 409
-
-    scenario_id = run_simulation(sim_type)
+    try:
+        scenario_id = run_simulation(simulation_type)
+    except RuntimeError as error:
+        return jsonify({'error': str(error)}), 409
     if not scenario_id:
-        return jsonify({'error': f'Unknown simulation type: {sim_type}'}), 400
+        return jsonify({'error': 'Simulation could not be started'}), 500
 
-    log_audit(user.get('username'), 'SIMULATION_STARTED', f'type={sim_type} scenario={scenario_id}')
-    return jsonify({'scenario_id': scenario_id, 'type': sim_type, 'status': 'STARTED'})
+    log_audit(
+        user.get('username'),
+        'SIMULATION_STARTED',
+        f'type={simulation_type}; scenario_id={scenario_id}',
+    )
+    return jsonify({
+        'scenario_id': scenario_id,
+        'type': simulation_type,
+        'simulated': True,
+        'message': 'Synthetic lab events started; this scenario does not generate captured network packets.',
+    }), 202
 
 
 @app.route('/api/lab/status', methods=['GET'])
@@ -1407,12 +1974,18 @@ def lab_status():
 
     from utils.attack_director import get_active_scenario, get_scenario_status
     from utils.honeypot import get_trigger_count
+    from models.network_scorer import get_status as get_network_model_status
+
+    network_model_status = get_network_model_status()
 
     return jsonify({
         'lab_mode':         _lab_mode,
         'active_scenario':  get_active_scenario(),
         'scenarios':        get_scenario_status(),
-        'ml_online':        True,
+        'network_model_online': network_model_status.get('network_ids_loaded', False),
+        'packet_capture_active': bool(
+            _tshark_capture and _tshark_capture.is_capturing
+        ),
         'blockchain_mode':  bc_logger.mode if bc_logger else 'unavailable',
         'honeypot_active':  True,
         'honeypot_triggers': get_trigger_count(),
@@ -1424,12 +1997,13 @@ def lab_stop():
     user = verify_token(request)
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
-    from utils.attack_director import _end_scenario, get_active_scenario
+    from utils.attack_director import get_active_scenario, request_stop_scenario
     active = get_active_scenario()
     if active:
-        _end_scenario(active, status='STOPPED')
+        if not request_stop_scenario(active):
+            return jsonify({'message': 'No active simulation'}), 409
         log_audit(user.get('username'), 'SIMULATION_STOPPED', active)
-        return jsonify({'message': f'Simulation {active} stopped'})
+        return jsonify({'message': f'Stopping simulation {active}'}), 202
     return jsonify({'message': 'No active simulation'})
 
 
@@ -1577,9 +2151,9 @@ def _build_live_incident_from_alert(alert: dict, scenario_id: str = None):
                 threat_intel = enrich_ip(ip, background=False)
                 abuse_score = threat_intel.get('abuseipdb', {}).get('abuse_score', 0)
                 shodan_ports = threat_intel.get('shodan', {}).get('port_count', 0)
-                print(f"🔍 Intel: {ip} → Abuse={abuse_score}% Shodan={shodan_ports} ports CVEs={threat_intel.get('shodan',{}).get('cve_count',0)}")
+                print(f"[INTEL] {ip} -> Abuse={abuse_score}% Shodan={shodan_ports} ports CVEs={threat_intel.get('shodan',{}).get('cve_count',0)}")
         except Exception as te:
-            print(f"ℹ️  Threat intel skipped: {te}")
+            print(f"[INFO] Threat intel skipped: {te}")
 
         local_ip = '127.0.0.1'
         try:
@@ -1698,7 +2272,7 @@ def _build_live_incident_from_event(event: dict):
             pass
 
         rs = calculate_risk(
-            ml_prediction    = ml.get('prediction') or (attack_type if 'RANSOM' in attack_type.upper() else None),
+            ml_prediction    = ml.get('prediction'),
             ml_confidence    = ml.get('confidence', 0),
             honeypot_hit     = hp_hit,
             honeypot_count   = 1 if hp_hit else 0,

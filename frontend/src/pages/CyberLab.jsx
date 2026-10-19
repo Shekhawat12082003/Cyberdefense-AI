@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { io } from 'socket.io-client'
 import { getLabStatus, startSimulation, stopSimulation, resetLab,
-         getHoneypotStatus, getHoneypotTriggers, getHoneypotFiles } from '../api'
+         getHoneypotStatus, getHoneypotTriggers, getHoneypotFiles,
+         setLabMode as updateLabMode } from '../api'
 
 const mono = (sz = 13, color = '#fff') => ({ fontFamily: 'monospace', fontSize: sz, color })
 const card = (border = '#00d4ff22') => ({
@@ -37,7 +38,7 @@ export default function CyberLab() {
   const [activeScen,  setActiveScen]  = useState(null)
   const [running,     setRunning]     = useState(false)
   const [terminal,    setTerminal]    = useState([])
-  const [labMode,     setLabMode]     = useState(true)
+  const [labMode,     setLabMode]     = useState(false)
   const logsRef = useRef(null)
   const socketRef = useRef(null)
 
@@ -48,7 +49,7 @@ export default function CyberLab() {
 
   // ── WebSocket ──────────────────────────────────────────
   useEffect(() => {
-    const socket = io('http://localhost:5000', { transports: ['websocket'] })
+    const socket = io('http://localhost:5000', { transports: ['polling'] })
     socketRef.current = socket
 
     socket.on('sim_log', (entry) => {
@@ -93,6 +94,7 @@ export default function CyberLab() {
         getLabStatus(), getHoneypotStatus(), getHoneypotTriggers(), getHoneypotFiles()
       ])
       setLabStatus(ls.data)
+      setLabMode(!!ls.data.lab_mode)
       setHpStatus(hs.data)
       setHpTriggers(ht.data.triggers || [])
       setHpFiles(hf.data.files || [])
@@ -109,6 +111,10 @@ export default function CyberLab() {
 
   // ── Run simulation ─────────────────────────────────────
   const runSim = async (simId) => {
+    if (!labMode) {
+      addLog('Enable simulation mode before starting a scenario.', '#ff8c00')
+      return
+    }
     if (running) {
       addLog('⚠️  Simulation already running. Stop it first.', '#ff8c00')
       return
@@ -121,7 +127,7 @@ export default function CyberLab() {
       const sid = r.data.scenario_id
       setActiveScen(sid)
       addLog(`Scenario: ${sid}`, '#00ff88')
-      addLog('Simulation running... (watch SOC dashboard for live alerts)', '#aaa')
+      addLog('Simulation running... (watch the SOC dashboard for simulated lab events)', '#aaa')
     } catch (e) {
       const err = e.response?.data?.error || e.message || 'Unknown error'
       addLog(`❌ Error: ${err}`, '#ff003c')
@@ -129,14 +135,32 @@ export default function CyberLab() {
     }
   }
 
+  const toggleLabMode = async () => {
+    const enabled = !labMode
+    try {
+      const response = await updateLabMode(enabled)
+      setLabMode(!!response.data.lab_mode)
+      addLog(
+        enabled
+          ? 'Simulation mode enabled. Scenarios emit synthetic lab events only.'
+          : 'Simulation mode disabled.',
+        enabled ? '#00ff88' : '#ff8c00',
+      )
+    } catch (e) {
+      const err = e.response?.data?.error || e.message || 'Unable to change simulation mode'
+      addLog(`❌ ${err}`, '#ff003c')
+    }
+  }
+
   const stopSim = async () => {
     try {
       const r = await stopSimulation()
       addLog(`✅ ${r.data.message || 'Stopped'}`, '#00ff88')
-    } catch {}
-    setRunning(false)
-    setActiveScen(null)
-    await fetchStatus()
+      await fetchStatus()
+    } catch (e) {
+      const err = e.response?.data?.error || e.message || 'Unable to stop simulation'
+      addLog(`❌ ${err}`, '#ff003c')
+    }
   }
 
   const resetLabEnv = async () => {
@@ -197,10 +221,22 @@ export default function CyberLab() {
         <div>
           <div style={{ ...mono(11, '#ff8c00'), fontWeight: 'bold', letterSpacing: 2 }}>SAFE ACADEMIC SIMULATION ENVIRONMENT</div>
           <div style={{ ...mono(10, '#666'), marginTop: 2 }}>
-            All simulations are controlled and contained. No real malware • No real encryption • No unauthorized network access
+            Synthetic events only—not captured packets. No real malware, encryption, or unauthorized network access.
           </div>
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <button
+            onClick={toggleLabMode}
+            style={{
+              padding: '6px 10px', borderRadius: 4, cursor: 'pointer',
+              background: labMode ? '#00ff8822' : 'transparent',
+              border: `1px solid ${labMode ? '#00ff88' : '#555'}`,
+              ...mono(9, labMode ? '#00ff88' : '#aaa'),
+              letterSpacing: 1,
+            }}
+          >
+            SIMULATION MODE {labMode ? 'ON' : 'OFF'}
+          </button>
           <div style={{
             padding: '4px 10px', borderRadius: 4,
             background: labStatus?.active_scenario ? '#ff003c22' : '#00ff8822',
@@ -222,7 +258,8 @@ export default function CyberLab() {
           <div style={card()}>
             <div style={{ ...mono(9, '#444'), letterSpacing: 3, marginBottom: 12 }}>SYSTEM STATUS</div>
             {[
-              { label: 'ML Engine',   ok: labStatus?.ml_online !== false },
+              { label: 'Network ML', ok: !!labStatus?.network_model_online },
+              { label: 'Packet Capture', ok: !!labStatus?.packet_capture_active },
               { label: 'Blockchain',  ok: true, val: labStatus?.blockchain_mode || '?' },
               { label: 'Honeypot',    ok: labStatus?.honeypot_active !== false },
               { label: 'File Monitor', ok: true },
@@ -327,14 +364,14 @@ export default function CyberLab() {
                 <button
                   key={sim.id}
                   onClick={() => runSim(sim.id)}
-                  disabled={running}
+                  disabled={running || !labMode}
                   style={{
-                    padding: '14px 10px', cursor: running ? 'not-allowed' : 'pointer',
+                    padding: '14px 10px', cursor: running || !labMode ? 'not-allowed' : 'pointer',
                     background: isActive ? `${col}22` : 'rgba(0,10,30,0.8)',
                     border: `1px solid ${isActive ? col : col + '44'}`,
                     borderRadius: 8, textAlign: 'left',
                     transition: 'all 0.2s',
-                    opacity: running && !isActive ? 0.5 : 1,
+                    opacity: (running && !isActive) || !labMode ? 0.5 : 1,
                   }}
                 >
                   <div style={{ ...mono(16, col), marginBottom: 4 }}>{sim.label}</div>
@@ -382,7 +419,7 @@ export default function CyberLab() {
               {terminal.length === 0 ? (
                 <div style={{ color: '#333', fontSize: 12 }}>
                   {'> '}Select a simulation above to begin...{'\n'}
-                  {'> '}All simulations run through the live ML detection pipeline.
+                  {'> '}Synthetic simulation events are separate from live packet/model detections.
                 </div>
               ) : terminal.map((line, i) => (
                 <div key={i} style={{ fontSize: 11, color: line.color || '#aaa', marginBottom: 2, lineHeight: 1.4 }}>

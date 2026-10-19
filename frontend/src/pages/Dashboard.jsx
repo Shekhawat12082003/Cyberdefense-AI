@@ -3,10 +3,14 @@ import { useNavigate, Link } from 'react-router-dom'
 import { io } from 'socket.io-client'
 import {
   getStats, getThreats, getIncidents, getHoneypotStatus,
-  getLabStatus, getSecurityEvents
+  getLabStatus, getSecurityEvents, getNetworkStats,
+  getCaptureStatus,
+  getVerifiedNetworkAlerts, getHoneypotTriggers, getHoneypotFiles,
+  enrichIP, geolocateIP, getNetworkAuditLogs, getNetworkPackets, getNetworkConnections
 } from '../api'
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, LineChart, Line } from 'recharts'
 import ThreatIntelPanel from '../components/ThreatIntelPanel'
+import WorkspaceSwitcher from '../components/WorkspaceSwitcher'
 
 // ── Design tokens ──────────────────────────────────────────
 const C = {
@@ -21,12 +25,28 @@ const cardStyle = (extra = {}) => ({
   background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 20, ...extra,
 })
 const sLabel = { ...m(9, C.muted), letterSpacing: 3, marginBottom: 12, textTransform: 'uppercase' }
-const navBtn  = (color = C.blue) => ({
-  padding: '7px 14px', fontSize: 10, fontFamily: 'monospace', fontWeight: 'bold',
-  letterSpacing: 2, background: 'transparent', border: `1px solid ${color}`,
-  borderRadius: 6, color, cursor: 'pointer', textDecoration: 'none',
-  display: 'inline-block', whiteSpace: 'nowrap',
-})
+const packetGridColumns = '54px minmax(190px, 1fr) minmax(190px, 1fr) 65px 58px 96px minmax(180px, 1.2fr)'
+
+const formatEndpoint = (ip, port) => {
+  if (!ip || ip === '—') return '—'
+  const address = String(ip)
+  if (port === undefined || port === null || port === '') return address
+  return address.includes(':') ? `[${address}]:${port}` : `${address}:${port}`
+}
+
+const stripEndpointPort = (endpoint, port) => {
+  if (!endpoint) return undefined
+  const value = String(endpoint)
+  if (value.startsWith('[')) {
+    const closingBracket = value.indexOf(']')
+    return closingBracket >= 0 ? value.slice(1, closingBracket) : value
+  }
+  if (port !== undefined && port !== null && port !== '') {
+    const suffix = `:${port}`
+    if (value.endsWith(suffix)) return value.slice(0, -suffix.length)
+  }
+  return value
+}
 
 // ── Status dot ─────────────────────────────────────────────
 const Dot = ({ ok, pulse }) => (
@@ -37,886 +57,1000 @@ const Dot = ({ ok, pulse }) => (
   }} />
 )
 
-// ── Score bar ──────────────────────────────────────────────
-const ScoreBar = ({ score }) => {
-  const pct = Math.min(score, 100)
-  const col = score > 70 ? C.red : score > 30 ? C.orange : C.green
-  return (
-    <div style={{ height: 4, background: '#111', borderRadius: 2 }}>
-      <div style={{ width: `${pct}%`, height: '100%', background: col, borderRadius: 2, boxShadow: `0 0 6px ${col}` }} />
-    </div>
-  )
-}
-
-// ── Status badge row ───────────────────────────────────────
-const StatusBadge = ({ label, active, activeColor = C.green }) => (
-  <div style={{
-    padding: '5px 10px', borderRadius: 4, textAlign: 'center',
-    background: active ? activeColor + '22' : '#0a0a1a',
-    border: `1px solid ${active ? activeColor + '66' : '#111'}`,
-    transition: 'all 0.4s',
-  }}>
-    <div style={{ ...m(8, active ? activeColor : C.muted), letterSpacing: 1, marginBottom: 2 }}>
-      {active ? '●' : '○'}
-    </div>
-    <div style={{ ...m(8, active ? activeColor : C.muted), letterSpacing: 1 }}>{label}</div>
+// ── Metric Card ─────────────────────────────────────────────
+const MetricCard = ({ label, value, change, color = C.blue, icon }) => (
+  <div style={cardStyle({ textAlign: 'center' })}>
+    <div style={{ fontSize: 20, marginBottom: 6 }}>{icon}</div>
+    <div style={{ ...m(28, color), fontWeight: 'bold', lineHeight: 1, marginBottom: 8 }}>{value}</div>
+    <div style={{ ...m(9, C.muted), letterSpacing: 2, marginBottom: 4 }}>{label}</div>
+    {change !== undefined && (
+      <div style={{ ...m(8, change >= 0 ? C.green : C.red) }}>
+        {change >= 0 ? '↑' : '↓'} {Math.abs(change)}% from yesterday
+      </div>
+    )}
   </div>
 )
 
-// ══════════════════════════════════════════════════════════
-// LIVE INCIDENT CARD — appears when attack detected
-// ══════════════════════════════════════════════════════════
-function LiveIncidentCard({ incident, onDismiss, navigate }) {
-  const [elapsed, setElapsed]   = useState(0)
-  const [statuses, setStatuses] = useState({
-    detected: true, honeypot: false, ml: false,
-    quarantine: false, evidence: false, blockchain: false,
-  })
-  const startRef = useRef(Date.now())
+// ── Network Flow Row ───────────────────────────────────────
+const NetworkFlowRow = ({ flow, onClick }) => {
+  const isSuspicious = flow.risk_score > 50 || flow.isSuspicious
+  const color = isSuspicious ? C.orange : C.green
+  const srcIP = flow.src_ip || flow.remote_ip || '—'
+  const srcPort = flow.src_port || flow.remote_port || '—'
+  const dstIP = flow.dst_ip || stripEndpointPort(flow.local, flow.local_port) || '—'
+  const dstPort = flow.dst_port || flow.local_port || '—'
+  const protocol = flow.protocol || flow.proto || 'TCP'
+  const number = flow.number || '—'
+  const status = flow.status || 'UNKNOWN'
+  const timestamp = flow.timestamp ? new Date(flow.timestamp).toLocaleTimeString() : '—'
+  const displayTime = flow.relative_time !== undefined
+    ? Number(flow.relative_time).toFixed(6)
+    : timestamp
+  const info = flow.info || ''
 
-  // Timer
-  useEffect(() => {
-    const id = setInterval(() => setElapsed(((Date.now() - startRef.current) / 1000).toFixed(2)), 100)
-    return () => clearInterval(id)
-  }, [])
+  // Wireshark-like fields
+  const flags = flow.flags || '—'
+  const length = flow.length || flow.bytes || 0
+  const direction = flow.direction || '—'
+  const source = formatEndpoint(srcIP, srcPort)
+  const destination = formatEndpoint(dstIP, dstPort)
+  const infoText = info || (flags !== '—' ? flags : '') ||
+    (status !== 'ACTIVE' && status !== 'UNKNOWN' ? status : `${protocol} datagram`)
 
-  // Progressive status updates from incident data
-  useEffect(() => {
-    if (!incident) return
-    const s = incident.status || {}
-    setStatuses({
-      detected:   true,
-      honeypot:   s.honeypot   || incident.honeypot?.triggered || false,
-      ml:         s.ml         || !!incident.ml?.prediction || false,
-      quarantine: s.quarantine || false,
-      evidence:   s.evidence   || false,
-      blockchain: s.blockchain || false,
-    })
-  }, [incident])
+  return (
+    <div
+      onClick={() => onClick && onClick(flow)}
+      style={{
+        display: 'grid', gridTemplateColumns: packetGridColumns, minWidth: 900,
+        gap: 10, padding: '9px 12px', borderBottom: '1px solid #111',
+        cursor: onClick ? (isSuspicious ? 'pointer' : 'default') : 'default',
+        background: isSuspicious ? '#1a0a00' : 'transparent',
+        fontSize: 11,
+      }}
+    >
+      <div style={m(10, C.muted)}>{number}</div>
+      <div title={source} style={{ ...m(10, C.blue), minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{source}</div>
+      <div title={destination} style={{ ...m(10, C.green), minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>→ {destination}</div>
+      <div style={{ ...m(10, C.muted), overflow: 'hidden', textOverflow: 'ellipsis' }}>{protocol}</div>
+      <div style={m(10, C.muted)}>{length}</div>
+      <div style={m(10, C.muted)}>{displayTime}</div>
+      <div style={{ ...m(10, color), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {`${infoText}${direction !== '—' ? ` · ${direction}` : ''}`}
+      </div>
+    </div>
+  )
+}
 
-  if (!incident) return null
+const mapNetworkConnection = (connection) => ({
+  ...connection,
+  src_ip: connection.src_ip || connection.remote_ip || stripEndpointPort(connection.remote, connection.remote_port),
+  src_port: connection.src_port || connection.remote_port,
+  dst_ip: connection.dst_ip || stripEndpointPort(connection.local, connection.local_port),
+  dst_port: connection.dst_port || connection.local_port,
+  protocol: connection.protocol || 'TCP',
+  timestamp: connection.timestamp || new Date().toISOString(),
+  status: connection.status || 'ACTIVE',
+  direction: connection.direction || '—',
+})
 
-  const sev      = incident.severity || 'HIGH'
-  const sevColor = SEV[sev] || C.orange
-  const score    = incident.risk_score || 0
-  const riskColor = score >= 76 ? C.red : score >= 51 ? C.orange : score >= 26 ? C.yellow : C.green
-  const attacker  = incident.attacker || {}
-  const geo       = attacker.geo || {}
-  const network   = incident.network || {}
-  const process   = incident.process || {}
-  const mitre     = incident.mitre || {}
+// ── Alert Row ─────────────────────────────────────────────
+const AlertRow = ({ alert, onClick }) => {
+  const severity = alert.severity || 'MEDIUM'
+  const color = SEV[severity] || C.orange
+  return (
+    <div
+      onClick={() => onClick && onClick(alert)}
+      style={{
+        display: 'grid', gridTemplateColumns: '100px 140px 140px 120px 80px 80px 100px',
+        gap: 10, padding: '10px 14px', borderBottom: '1px solid #111',
+        cursor: onClick ? 'pointer' : 'default',
+        background: severity === 'CRITICAL' ? '#1a0000' : 'transparent',
+      }}
+    >
+      <div style={{ padding: '2px 8px', background: color + '22', border: `1px solid ${color}`, borderRadius: 4, ...m(9, color), fontWeight: 'bold', textAlign: 'center' }}>{severity}</div>
+      <div style={m(10, C.blue)}>{alert.attack_type || alert.type || 'Unknown'}</div>
+      <div style={m(10, C.text)}>{alert.attacker_ip || alert.src_ip || 'Unknown'}</div>
+      <div style={m(10, C.green)}>{alert.target_ip || alert.dst_ip || 'Unknown'}</div>
+      <div style={m(10, C.muted)}>{alert.target_port || alert.port || '-'}</div>
+      <div style={{ ...m(10, color), fontWeight: 'bold' }}>{alert.confidence || 0}%</div>
+      <div style={m(9, '#666')}>{new Date(alert.timestamp).toLocaleTimeString()}</div>
+    </div>
+  )
+}
 
-  const geoLine = geo.type === 'private'
-    ? 'LOCAL NETWORK'
-    : geo.type === 'approximate'
-      ? `${geo.city || '?'}, ${geo.country || '?'}`
-      : 'Unknown'
+// ── Attacker Profile ───────────────────────────────────────
+const AttackerProfile = ({ ip, intel, loading, error, onClose, onRetry }) => {
+  if (!ip) return null
+  const geo = intel?.geo || {}
+  const abuse = intel?.abuse || {}
+  const shodan = intel?.shodan || {}
 
   return (
     <div style={{
-      position: 'relative',
-      background: 'rgba(0,0,10,0.97)',
-      border: `2px solid ${sevColor}`,
-      borderRadius: 12,
-      padding: 0,
-      marginBottom: 20,
-      boxShadow: `0 0 40px ${sevColor}44, inset 0 0 60px ${sevColor}08`,
-      overflow: 'hidden',
-      animation: 'incidentIn 0.4s ease-out',
+      position: 'fixed', top: 0, right: 0, bottom: 0, width: 420,
+      background: C.card, borderLeft: `2px solid ${C.blue}`,
+      zIndex: 1000, overflow: 'auto', padding: 20,
     }}>
-
-      {/* ── Scan line animation ─────────────────────── */}
-      <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0, height: 2,
-        background: `linear-gradient(90deg, transparent, ${sevColor}, transparent)`,
-        animation: 'scanLine 2s linear infinite',
-      }} />
-
-      {/* ── Header bar ─────────────────────────────── */}
-      <div style={{
-        background: `linear-gradient(90deg, ${sevColor}22, transparent)`,
-        borderBottom: `1px solid ${sevColor}33`,
-        padding: '12px 20px',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{
-            width: 10, height: 10, borderRadius: '50%',
-            background: sevColor, boxShadow: `0 0 12px ${sevColor}`,
-            animation: 'pulse 0.8s infinite',
-          }} />
-          <span style={{ ...m(13, '#fff'), fontWeight: 'bold', letterSpacing: 3 }}>
-            🚨 LIVE INCIDENT — {incident.attack_type?.replace(/_/g, ' ') || 'THREAT DETECTED'}
-          </span>
-          <span style={{
-            padding: '2px 10px', borderRadius: 3,
-            background: sevColor + '33', border: `1px solid ${sevColor}`,
-            ...m(10, sevColor), fontWeight: 'bold', letterSpacing: 2,
-          }}>{sev}</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ ...m(10, C.muted), letterSpacing: 1 }}>
-            Detection: <span style={{ color: C.green }}>{elapsed}s</span>
-          </span>
-          <button onClick={onDismiss} style={{
-            background: 'transparent', border: `1px solid ${C.muted}`,
-            borderRadius: 4, color: C.muted, cursor: 'pointer',
-            padding: '3px 8px', fontFamily: 'monospace', fontSize: 10,
-          }}>✕ DISMISS</button>
-        </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <h3 style={{ ...m(16, C.blue), margin: 0 }}>ATTACKER PROFILE</h3>
+        <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: C.muted, fontSize: 20, cursor: 'pointer' }}>✕</button>
       </div>
 
-      {/* ── Main content ────────────────────────────── */}
-      <div style={{ padding: 20, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 220px', gap: 16 }}>
-
-        {/* Col 1: Attacker Info */}
-        <div>
-          <div style={sLabel}>ATTACKER INFORMATION</div>
-          {[
-            ['Source IP',    attacker.ip       || 'Unknown'],
-            ['Source Port',  attacker.port     || 'Unknown'],
-            ['Protocol',     attacker.protocol || 'TCP'],
-            ['MAC Address',  attacker.mac      || 'Unknown'],
-            ['Destination',  `${incident.target?.ip || '?'}:${incident.target?.port || '?'}`],
-          ].map(([k, v]) => (
-            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, borderBottom: '1px solid #0d0d1a', paddingBottom: 4 }}>
-              <span style={m(10, C.muted)}>{k}</span>
-              <span style={{ ...m(10, attacker.ip && k === 'Source IP' ? sevColor : '#ccc'), fontWeight: k === 'Source IP' ? 'bold' : 'normal' }}>{v}</span>
-            </div>
-          ))}
-
-          {/* Geo */}
-          <div style={{ marginTop: 12, padding: '8px 10px', background: '#080818', border: '1px solid #111', borderRadius: 4 }}>
-            <div style={{ ...m(9, C.muted), letterSpacing: 2, marginBottom: 4 }}>📍 LOCATION</div>
-            {geo.type === 'private' ? (
-              <div style={m(11, C.blue)}>LOCAL NETWORK</div>
-            ) : geo.type === 'approximate' ? (
-              <>
-                <div style={{ ...m(12, C.blue), fontWeight: 'bold' }}>{geoLine}</div>
-                <div style={{ ...m(9, C.muted), marginTop: 2 }}>ISP: {geo.isp || 'Unknown'}</div>
-                <div style={{ ...m(9, C.muted) }}>ASN: {geo.asn || 'Unknown'}</div>
-                <div style={{ ...m(8, '#333'), marginTop: 4 }}>⚠ APPROXIMATE IP GEOLOCATION</div>
-              </>
-            ) : (
-              <div style={m(10, C.muted)}>Location: Unknown</div>
-            )}
-          </div>
+      <div style={cardStyle({ marginBottom: 16 })}>
+        <div style={sLabel}>IDENTITY</div>
+        <div style={{ marginBottom: 8 }}>
+          <span style={m(9, C.muted)}>IP ADDRESS</span>
+          <div style={{ ...m(14, C.blue), fontWeight: 'bold' }}>{ip}</div>
         </div>
-
-        {/* Col 2: Attack Details */}
-        <div>
-          <div style={sLabel}>ATTACK DETAILS</div>
-          {[
-            ['Attack Type',  incident.attack_type?.replace(/_/g, ' ') || '?'],
-            ['MITRE',        mitre.id ? `${mitre.id} — ${mitre.name}` : 'N/A'],
-            ['Ports Hit',    network.ports_hit?.length ? `${network.ports_hit.length} ports` : network.connection_count ? `${network.connection_count} conns` : '—'],
-            ['Target Port',  network.target_port || '—'],
-            ['Process',      process.name || '—'],
-            ['PID',          process.pid || '—'],
-          ].map(([k, v]) => (
-            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, borderBottom: '1px solid #0d0d1a', paddingBottom: 4 }}>
-              <span style={m(10, C.muted)}>{k}</span>
-              <span style={m(10, '#ccc')}>{v}</span>
-            </div>
-          ))}
-
-          {/* Honeypot indicator */}
-          {(statuses.honeypot || incident.honeypot?.triggered) && (
-            <div style={{
-              marginTop: 10, padding: '8px 10px',
-              background: '#1a0000', border: `1px solid ${C.red}55`,
-              borderRadius: 4,
-            }}>
-              <div style={{ ...m(10, C.red), fontWeight: 'bold' }}>🍯 HONEYPOT TRIGGERED</div>
-              <div style={{ ...m(9, C.muted), marginTop: 3 }}>
-                {incident.honeypot?.resource || 'Decoy resource accessed'}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Col 3: Risk Score */}
-        <div>
-          <div style={sLabel}>RISK ASSESSMENT</div>
-
-          {/* Big score */}
-          <div style={{ textAlign: 'center', marginBottom: 16 }}>
-            <div style={{
-              ...m(56, riskColor), fontWeight: 'bold', lineHeight: 1,
-              textShadow: `0 0 30px ${riskColor}88`,
-            }}>{score.toFixed(0)}</div>
-            <div style={{ ...m(10, C.muted), letterSpacing: 2, marginTop: 4 }}>RISK SCORE / 100</div>
-            <div style={{
-              display: 'inline-block', marginTop: 8, padding: '4px 14px',
-              background: riskColor + '22', border: `1px solid ${riskColor}`,
-              borderRadius: 4, ...m(11, riskColor), fontWeight: 'bold', letterSpacing: 3,
-            }}>{incident.risk_level || 'HIGH'}</div>
-          </div>
-
-          {/* Factor bars */}
+        {geo.hostname && (
           <div style={{ marginBottom: 8 }}>
-            {(incident.risk_factors || []).slice(0, 4).map((f, i) => (
-              <div key={i} style={{ marginBottom: 6 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-                  <span style={m(9, C.muted)}>{f.name}</span>
-                  <span style={{ ...m(9, C.blue), fontWeight: 'bold' }}>+{(f.contribution || 0).toFixed(1)}</span>
-                </div>
-                <div style={{ height: 3, background: '#111', borderRadius: 2 }}>
-                  <div style={{
-                    width: `${Math.min(((f.contribution || 0) / (f.weight || 25)) * 100, 100)}%`,
-                    height: '100%', background: C.blue, borderRadius: 2,
-                  }} />
-                </div>
-              </div>
-            ))}
-            {(!incident.risk_factors || incident.risk_factors.length === 0) && (
-              <div style={m(9, C.muted)}>Risk factors loading...</div>
-            )}
+            <span style={m(9, C.muted)}>HOSTNAME</span>
+            <div style={m(11, C.text)}>{geo.hostname}</div>
           </div>
+        )}
+      </div>
+
+      <div style={cardStyle({ marginBottom: 16 })}>
+        <div style={sLabel}>GEOLOCATION</div>
+        {loading ? (
+          <div style={m(11, C.blue)}>Looking up IP location…</div>
+        ) : geo.type === 'private' ? (
+          <div style={m(12, C.blue)}>LOCAL NETWORK — public geolocation is not applicable</div>
+        ) : geo.type === 'unknown' || !geo.type ? (
+          <div style={{ ...m(11, C.orange), lineHeight: 1.6 }}>
+            <div>{error || geo.note || 'Geolocation lookup unavailable.'}</div>
+            <button onClick={onRetry} style={{ marginTop: 10, padding: '6px 10px', background: 'transparent', border: `1px solid ${C.orange}`, borderRadius: 4, ...m(10, C.orange), cursor: 'pointer' }}>
+              RETRY LOOKUP
+            </button>
+          </div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>COUNTRY</span>
+              <div style={m(11, C.text)}>{geo.country_name || geo.country || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>CITY</span>
+              <div style={m(11, C.text)}>{geo.city || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>REGION</span>
+              <div style={m(11, C.text)}>{geo.region || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>COORDINATES</span>
+              <div style={m(11, C.text)}>{geo.lat != null && geo.lon != null ? `${geo.lat}, ${geo.lon}` : 'Not provided'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>TIMEZONE</span>
+              <div style={m(11, C.text)}>{geo.timezone || 'Unknown'}</div>
+            </div>
+            {geo.note && <div style={{ ...m(9, C.muted), lineHeight: 1.5 }}>{geo.note}</div>}
+          </>
+        )}
+      </div>
+
+      <div style={cardStyle({ marginBottom: 16 })}>
+        <div style={sLabel}>NETWORK INFO</div>
+        <div style={{ marginBottom: 8 }}>
+          <span style={m(9, C.muted)}>ISP</span>
+          <div style={m(11, C.text)}>{geo.isp || abuse.isp || 'Unknown'}</div>
         </div>
-
-        {/* Col 4: Response Status + Actions */}
-        <div>
-          <div style={sLabel}>RESPONSE STATUS</div>
-
-          {/* Status badges */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 16 }}>
-            <StatusBadge label="DETECTED"   active={statuses.detected}   activeColor={C.green} />
-            <StatusBadge label="HONEYPOT"   active={statuses.honeypot}   activeColor={C.red} />
-            <StatusBadge label="ML ENGINE"  active={statuses.ml}         activeColor={C.blue} />
-            <StatusBadge label="QUARANTINE" active={statuses.quarantine} activeColor={C.orange} />
-            <StatusBadge label="EVIDENCE"   active={statuses.evidence}   activeColor={C.purple} />
-            <StatusBadge label="BLOCKCHAIN" active={statuses.blockchain} activeColor={C.blue} />
-          </div>
-
-          {/* Action buttons */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {incident.incident_id && (
-              <button onClick={() => navigate(`/incidents/${incident.incident_id}`)} style={{
-                padding: '8px', fontSize: 9, letterSpacing: 2, fontFamily: 'monospace',
-                background: sevColor + '22', border: `1px solid ${sevColor}`,
-                borderRadius: 4, color: sevColor, cursor: 'pointer',
-              }}>📋 VIEW INCIDENT</button>
-            )}
-            <button onClick={() => navigate('/incidents')} style={{
-              padding: '8px', fontSize: 9, letterSpacing: 2, fontFamily: 'monospace',
-              background: '#ff8c0011', border: `1px solid ${C.orange}`,
-              borderRadius: 4, color: C.orange, cursor: 'pointer',
-            }}>🚨 ALL INCIDENTS</button>
-            <button onClick={() => navigate('/lab')} style={{
-              padding: '8px', fontSize: 9, letterSpacing: 2, fontFamily: 'monospace',
-              background: '#00d4ff11', border: `1px solid ${C.blue}`,
-              borderRadius: 4, color: C.blue, cursor: 'pointer',
-            }}>🔬 CYBER LAB</button>
-            <button onClick={() => navigate('/network')} style={{
-              padding: '8px', fontSize: 9, letterSpacing: 2, fontFamily: 'monospace',
-              background: '#00ff8811', border: `1px solid ${C.green}`,
-              borderRadius: 4, color: C.green, cursor: 'pointer',
-            }}>🌐 NETWORK</button>
-          </div>
+        <div style={{ marginBottom: 8 }}>
+          <span style={m(9, C.muted)}>ASN</span>
+          <div style={m(11, C.text)}>{geo.asn || abuse.asn || 'Unknown'}</div>
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <span style={m(9, C.muted)}>ORGANIZATION</span>
+          <div style={m(11, C.text)}>{geo.org || abuse.org || 'Unknown'}</div>
         </div>
       </div>
 
-      {/* ── Bottom: ports list if port scan ─────────── */}
-      {network.ports_hit?.length > 0 && (
-        <div style={{ borderTop: '1px solid #111', padding: '10px 20px', background: '#030308' }}>
-          <span style={{ ...m(9, C.muted), letterSpacing: 2, marginRight: 12 }}>PORTS SCANNED:</span>
-          {network.ports_hit.slice(0, 30).map(p => (
-            <span key={p} style={{
-              display: 'inline-block', margin: '2px 3px', padding: '1px 6px',
-              background: '#0a0a1a', border: '1px solid #1a1a2e', borderRadius: 3,
-              ...m(9, C.muted),
-            }}>{p}</span>
-          ))}
-          {network.ports_hit.length > 30 && (
-            <span style={m(9, C.muted)}> +{network.ports_hit.length - 30} more</span>
-          )}
+      {abuse.confidence_score !== undefined && (
+        <div style={cardStyle({ marginBottom: 16 })}>
+          <div style={sLabel}>REPUTATION</div>
+          <div style={{ marginBottom: 8 }}>
+            <span style={m(9, C.muted)}>ABUSE CONFIDENCE</span>
+            <div style={{ ...m(14, abuse.confidence_score > 50 ? C.red : C.green), fontWeight: 'bold' }}>{abuse.confidence_score}%</div>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <span style={m(9, C.muted)}>REPORTS</span>
+            <div style={m(11, C.text)}>{abuse.total_reports || 0}</div>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <span style={m(9, C.muted)}>LAST REPORTED</span>
+            <div style={m(11, C.text)}>{abuse.last_reported || 'Never'}</div>
+          </div>
         </div>
       )}
 
-      {/* ── Threat Intelligence ─────────────────────── */}
-      {attacker.ip && (
-        <div style={{ borderTop: '1px solid #111', padding: '14px 20px', background: '#030308' }}>
-          <ThreatIntelPanel
-            ip={attacker.ip}
-            inlineData={incident.threat_intel}
-          />
+      {shodan.open_ports && shodan.open_ports.length > 0 && (
+        <div style={cardStyle({ marginBottom: 16 })}>
+          <div style={sLabel}>OPEN PORTS</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {shodan.open_ports.map(p => (
+              <span key={p} style={{ padding: '3px 8px', background: '#0a0a1a', border: '1px solid #1a1a2e', borderRadius: 4, ...m(10, C.muted) }}>{p}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {shodan.vulns && shodan.vulns.length > 0 && (
+        <div style={cardStyle({ marginBottom: 16 })}>
+          <div style={sLabel}>VULNERABILITIES</div>
+          {shodan.vulns.slice(0, 5).map(v => (
+            <div key={v} style={{ padding: '6px 10px', background: '#1a0000', border: '1px solid #330000', borderRadius: 4, marginBottom: 6, ...m(10, C.red) }}>{v}</div>
+          ))}
         </div>
       )}
     </div>
   )
 }
 
-// ══════════════════════════════════════════════════════════
-// MAIN DASHBOARD
-// ══════════════════════════════════════════════════════════
+// ── MAIN DASHBOARD - SINGLE PAGE SOC INTERFACE ─────────────
 export default function Dashboard() {
-  const [stats,       setStats]       = useState(null)
-  const [threats,     setThreats]     = useState([])
-  const [incidents,   setIncidents]   = useState([])
-  const [hpStatus,    setHpStatus]    = useState(null)
-  const [labStatus,   setLabStatus]   = useState(null)
-  const [secEvents,   setSecEvents]   = useState([])
-  const [liveIncident, setLiveIncident] = useState(null)   // the big card
-  const [liveAlerts,  setLiveAlerts]  = useState([])
-  const [loading,     setLoading]     = useState(true)
-  const navigate  = useNavigate()
-  const socketRef = useRef(null)
+  const [stats, setStats] = useState(null)
+  const [threats, setThreats] = useState([])
+  const [incidents, setIncidents] = useState([])
+  const [hpStatus, setHpStatus] = useState(null)
+  const [labStatus, setLabStatus] = useState(null)
+  const [secEvents, setSecEvents] = useState([])
+  const [liveIncident, setLiveIncident] = useState(null)
+  const [liveAlerts, setLiveAlerts] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [networkStats, setNetworkStats] = useState(null)
+  const [networkAlerts, setNetworkAlerts] = useState([])
+  const [hpTriggers, setHpTriggers] = useState([])
+  const [hpHitsToday, setHpHitsToday] = useState(0)
+  const [hpFiles, setHpFiles] = useState([])
+  const [connections, setConnections] = useState([])
+  const [packets, setPackets] = useState([])
+  const [selectedAttackerIP, setSelectedAttackerIP] = useState(null)
+  const [attackerIntel, setAttackerIntel] = useState(null)
+  const [attackerIntelLoading, setAttackerIntelLoading] = useState(false)
+  const [attackerIntelError, setAttackerIntelError] = useState('')
+  const [attackerIntelRetry, setAttackerIntelRetry] = useState(0)
+  const [networkAuditLogs, setNetworkAuditLogs] = useState([])
 
-  const role     = localStorage.getItem('role')
+  const navigate = useNavigate()
+  const socketRef = useRef(null)
+  const dataLoadRef = useRef(false)
+  const networkLoadRef = useRef(false)
+  const captureModeRef = useRef(null)
+
+  const role = localStorage.getItem('role')
   const username = localStorage.getItem('user')
-  const isAdmin  = role === 'admin'
-  const logout   = () => { localStorage.clear(); navigate('/login', { replace: true }) }
+  const isAdmin = role === 'admin'
+  const logout = () => { localStorage.clear(); navigate('/login', { replace: true }) }
+
+  // ── Load Data ─────────────────────────────────────────────
+  const loadData = async () => {
+    if (dataLoadRef.current) return
+    dataLoadRef.current = true
+    console.log('[Dashboard] Starting data load...')
+    try {
+      const request = (promise, fallback, label) => promise.catch(error => {
+        if (error?.response?.status === 401) throw error
+        console.error(`${label} error:`, error)
+        return { data: fallback }
+      })
+      const [
+        statsRes, threatsRes, incidentsRes, hpRes, labRes, eventsRes,
+        netStatsRes, captureRes, netAlertsRes, hpTriggersRes, hpFilesRes, auditRes,
+      ] = await Promise.all([
+        request(getStats(), {}, 'Stats'),
+        request(getThreats(), [], 'Threats'),
+        request(getIncidents(), { incidents: [] }, 'Incidents'),
+        request(getHoneypotStatus(), {}, 'Honeypot status'),
+        request(getLabStatus(), {}, 'Lab status'),
+        request(getSecurityEvents(), { events: [] }, 'Events'),
+        request(getNetworkStats(), {}, 'Network stats'),
+        request(getCaptureStatus(), {}, 'Capture status'),
+        request(getVerifiedNetworkAlerts(), { alerts: [] }, 'Verified network alerts'),
+        request(getHoneypotTriggers(), { triggers: [] }, 'Honeypot triggers'),
+        request(getHoneypotFiles(), { files: [] }, 'Honeypot files'),
+        request(getNetworkAuditLogs(100), { logs: [] }, 'Network audit'),
+      ])
+
+      setStats(statsRes.data)
+      // threats API returns array directly, not wrapped in { threats: [] }
+      setThreats(Array.isArray(threatsRes.data) ? threatsRes.data : (threatsRes.data.threats || []))
+      setIncidents(incidentsRes.data.incidents || [])
+      setHpStatus(hpRes.data)
+      setLabStatus(labRes.data)
+      setSecEvents(eventsRes.data.events || [])
+      const nextNetworkStats = {
+        ...netStatsRes.data,
+        capture_mode: captureRes.data.is_capturing ? 'tshark' : netStatsRes.data.capture_mode,
+        packets_captured: captureRes.data.packets_captured ?? netStatsRes.data.packets_captured,
+      }
+      captureModeRef.current = nextNetworkStats.capture_mode
+      setNetworkStats(nextNetworkStats)
+      setNetworkAlerts((netAlertsRes.data.alerts || []).filter(alert =>
+        alert.is_verified === true && alert.verification === 'trained_network_ids'
+      ))
+      setHpTriggers(hpTriggersRes.data.triggers || [])
+      setHpHitsToday(Number(hpTriggersRes.data.verified_hits_today || 0))
+      setHpFiles(hpFilesRes.data.files || [])
+      setNetworkAuditLogs(auditRes.data.logs || [])
+    } catch (e) {
+      console.error('Failed to load dashboard data:', e)
+      console.error('Error response:', e?.response?.data)
+      console.error('Error message:', e?.message)
+      // If unauthorized, clear storage and redirect to login
+      if (e?.response?.status === 401) {
+        localStorage.clear()
+        navigate('/login', { replace: true })
+        return
+      }
+      console.error('[Dashboard] Data refresh failed')
+    } finally {
+      setLoading(false)
+      dataLoadRef.current = false
+    }
+  }
+
+  // ── Load network data ─────────────────────────────────────
+  const loadNetworkData = async () => {
+    if (networkLoadRef.current) return
+    if (captureModeRef.current === 'tshark') return
+    networkLoadRef.current = true
+    try {
+      let hasPacketCapture = false
+      // Load packets for Wireshark-like detailed view
+      const packRes = await getNetworkPackets()
+      const packData = packRes.data
+      // Map packet data to connection format
+      const mappedPackets = (packData.packets || []).map(pkt => ({
+          src_ip: pkt.src_ip || '—',
+          src_port: pkt.src_port || 0,
+          dst_ip: pkt.dst_ip || '—',
+          dst_port: pkt.dst_port || 0,
+          protocol: pkt.protocol || pkt.proto || 'TCP',
+          number: pkt.number || '',
+          relative_time: pkt.relative_time,
+          flags: pkt.flags || '—',
+          length: pkt.length || 0,
+          bytes: pkt.length || 0,
+          ttl: pkt.ttl || '—',
+          window: pkt.window || '—',
+          seq: pkt.seq || '—',
+          ack: pkt.ack || '—',
+          status: pkt.flags ? pkt.flags.split('|')[0] : 'ACTIVE',
+          timestamp: pkt.time || new Date().toISOString(),
+          risk_score: 0,
+          direction: pkt.direction || 'IN',
+          info: pkt.info || '',
+      }))
+      if (mappedPackets.length > 0) {
+        hasPacketCapture = true
+        setConnections(mappedPackets)
+        setPackets(packData.packets.slice(0, 500))
+      }
+
+      // Also load connections for stats
+      const connRes = await getNetworkConnections()
+      const connData = connRes.data
+      const liveConnections = (connData.connections || []).map(mapNetworkConnection)
+      // Packet capture requires elevated access; use the psutil connection
+      // stream as the live view when packet capture is unavailable.
+      if (!hasPacketCapture) setConnections(liveConnections)
+    } catch (e) {
+      console.error('Failed to load network data:', e)
+      // Don't let network data errors block the dashboard
+    } finally {
+      networkLoadRef.current = false
+    }
+  }
 
   // ── WebSocket ─────────────────────────────────────────
   useEffect(() => {
-    const socket = io('http://localhost:5000', { transports: ['websocket'] })
+    const socket = io('http://localhost:5000', {
+      transports: ['polling'],
+      upgrade: false,
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+    })
     socketRef.current = socket
 
-    // THE main event — any real or simulated attack → show incident card
     socket.on('live_incident', (data) => {
+      const isSimulation = Boolean(data.scenario_id)
+      if (!isSimulation && (data.is_verified !== true || data.verification !== 'trained_network_ids')) return
       setLiveIncident(data)
-      // Also add to alert feed
-      const ts  = new Date().toLocaleTimeString()
+      const ts = new Date().toLocaleTimeString()
       const col = SEV[data.severity] || C.orange
       setLiveAlerts(prev => [{
-        ts,
-        msg:  `${data.attack_type?.replace(/_/g, ' ')} — Risk ${Math.round(data.risk_score || 0)}/100`,
-        col,
-        src:  (data.attacker || {}).ip || '',
-        geo:  ((data.attacker || {}).geo || {}).city
-              ? `${(data.attacker.geo).city}, ${(data.attacker.geo).country}`
-              : '',
+        ts, msg: `${isSimulation ? 'SIMULATION · ' : ''}${data.attack_type?.replace(/_/g, ' ')} — Risk ${Math.round(data.risk_score || 0)}/100`,
+        col, src: (data.attacker || {}).ip || '',
+        geo: ((data.attacker || {}).geo || {}).city ? `${(data.attacker.geo).city}, ${(data.attacker.geo).country}` : '',
       }, ...prev.slice(0, 14)])
       loadData()
     })
 
-    // Network alert without full incident yet
     socket.on('network_alert', (data) => {
-      const ts  = new Date().toLocaleTimeString()
+      const isVerified = data.is_verified === true && data.verification === 'trained_network_ids'
+      if (!isVerified && !data.scenario_id) return
+      if (!isVerified) {
+        const ts = new Date().toLocaleTimeString()
+        setLiveAlerts(prev => [{
+          ts,
+          msg: `SIMULATION · ${data.description || data.type || 'Network event'}`,
+          col: SEV[data.severity] || C.orange,
+          src: data.ip || '',
+          geo: '',
+        }, ...prev.slice(0, 14)])
+        return
+      }
+      setNetworkAlerts(prev => {
+        if (prev.some(alert => alert.id && alert.id === data.id)) return prev
+        return [data, ...prev].slice(0, 1000)
+      })
+      const ts = new Date().toLocaleTimeString()
       const col = SEV[data.severity] || C.orange
-      setLiveAlerts(prev => [{
-        ts,
-        msg:  data.description || data.type || 'Network alert',
-        col,
-        src:  data.ip || '',
-        geo:  '',
-      }, ...prev.slice(0, 14)])
+      setLiveAlerts(prev => [{ ts, msg: data.description || data.type || 'Network alert', col, src: data.ip || '', geo: '' }, ...prev.slice(0, 14)])
+    })
+
+    socket.on('network_update', (data) => {
+      const legacyCaptureMode = data.stats?.capture_mode === 'raw_socket+psutil'
+      if (data.stats) {
+        const previousCaptureMode = captureModeRef.current
+        const incomingCaptureMode = data.stats.capture_mode
+        const nextCaptureMode = legacyCaptureMode && previousCaptureMode === 'tshark'
+          ? 'tshark'
+          : (incomingCaptureMode || previousCaptureMode)
+        captureModeRef.current = nextCaptureMode
+        setNetworkStats(prev => {
+          const preserveTSharkCount = legacyCaptureMode && nextCaptureMode === 'tshark'
+          return {
+            ...prev,
+            ...data.stats,
+            capture_mode: nextCaptureMode,
+            packets_captured: preserveTSharkCount
+              ? prev?.packets_captured
+              : data.stats.packets_captured ?? prev?.packets_captured,
+          }
+        })
+      }
+      // The legacy monitor emits the same rolling packet snapshot repeatedly.
+      // While TShark is active, only accept its bounded batches.
+      if (!legacyCaptureMode && Array.isArray(data.packets) && data.packets.length > 0) {
+        setPackets(prev => {
+          const seen = new Set()
+          return [...data.packets, ...prev]
+            .filter(packet => {
+              const key = `${packet.number || ''}:${packet.time || ''}:${packet.src_ip || ''}:${packet.dst_ip || ''}`
+              if (seen.has(key)) return false
+              seen.add(key)
+              return true
+            })
+            .slice(0, 2000)
+        })
+        setConnections(prev => [...data.packets.map(mapNetworkConnection), ...prev].slice(0, 100))
+      } else if (captureModeRef.current !== 'tshark' && !legacyCaptureMode && Array.isArray(data.connections)) {
+        setConnections(data.connections.map(mapNetworkConnection))
+      }
     })
 
     socket.on('honeypot_triggered', (entry) => {
       const ts = new Date().toLocaleTimeString()
-      setLiveAlerts(prev => [{
-        ts,
-        msg: `🍯 HONEYPOT: ${entry.resource} — ${entry.process_name || '?'}`,
-        col: C.red, src: entry.source_ip || '', geo: '',
-      }, ...prev.slice(0, 14)])
-      // Update live incident card if one is showing
-      setLiveIncident(prev => prev ? {
-        ...prev,
-        honeypot:   { triggered: true, resource: entry.resource },
-        status:     { ...prev.status, honeypot: true },
-      } : prev)
+      setLiveAlerts(prev => [{ ts, msg: `🍯 HONEYPOT: ${entry.resource} — ${entry.process_name || '?'}`, col: C.red, src: entry.source_ip || '', geo: '' }, ...prev.slice(0, 14)])
+      setLiveIncident(prev => prev ? { ...prev, honeypot: { triggered: true, resource: entry.resource }, status: { ...prev.status, honeypot: true } } : prev)
       loadData()
     })
 
     socket.on('security_event', (ev) => {
       if (ev.severity === 'CRITICAL' || ev.severity === 'HIGH') {
-        const ts  = new Date().toLocaleTimeString()
-        setLiveAlerts(prev => [{
-          ts, msg: ev.description || ev.event_type || 'Event',
-          col: SEV[ev.severity] || C.orange,
-          src: (ev.source || {}).ip || '', geo: '',
-        }, ...prev.slice(0, 14)])
+        const ts = new Date().toLocaleTimeString()
+        setLiveAlerts(prev => [{ ts, msg: ev.description || ev.event_type || 'Event', col: SEV[ev.severity] || C.orange, src: (ev.source || {}).ip || '', geo: '' }, ...prev.slice(0, 14)])
       }
       setSecEvents(prev => [ev, ...prev.slice(0, 49)])
     })
 
     socket.on('incident_created', () => loadData())
     socket.on('incident_updated', () => loadData())
-    socket.on('file_scanned',     () => loadData())
+    socket.on('file_scanned', () => loadData())
 
     return () => socket.disconnect()
   }, [])
 
-  // ── Data fetch ────────────────────────────────────────
-  const loadData = async () => {
-    try {
-      const [s, t, inc, hp, lab] = await Promise.all([
-        getStats(),
-        getThreats(),
-        getIncidents({ limit: 5 }).catch(() => ({ data: { incidents: [] } })),
-        getHoneypotStatus().catch(() => ({ data: {} })),
-        getLabStatus().catch(() => ({ data: {} })),
-      ])
-      setStats(s.data)
-      setThreats(t.data.slice(0, 10))
-      setIncidents(inc.data.incidents || [])
-      setHpStatus(hp.data)
-      setLabStatus(lab.data)
-    } catch (err) {
-      if (err?.response?.status === 401) {
-        localStorage.clear()
-        navigate('/login', { replace: true })
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
+  // ── Load attacker intel ───────────────────────────────────
+  useEffect(() => {
+    if (!selectedAttackerIP) return undefined
+    let cancelled = false
+    setAttackerIntel(null)
+    setAttackerIntelError('')
+    setAttackerIntelLoading(true)
+    Promise.allSettled([geolocateIP(selectedAttackerIP), enrichIP(selectedAttackerIP)])
+      .then(([geoResult, intelResult]) => {
+        if (cancelled) return
+        const nextIntel = {}
+        if (geoResult.status === 'fulfilled') {
+          nextIntel.geo = geoResult.value.data.geo
+        } else {
+          console.error('Geolocation lookup failed:', geoResult.reason)
+          setAttackerIntelError('Geolocation request failed. Check the backend connection and retry.')
+        }
+        if (intelResult.status === 'fulfilled') {
+          nextIntel.abuse = intelResult.value.data.abuseipdb
+          nextIntel.shodan = intelResult.value.data.shodan
+        } else {
+          console.error('Threat intelligence lookup failed:', intelResult.reason)
+        }
+        setAttackerIntel(nextIntel)
+      })
+      .finally(() => {
+        if (!cancelled) setAttackerIntelLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [selectedAttackerIP, attackerIntelRetry])
 
+  // ── Initial load ─────────────────────────────────────────
   useEffect(() => {
     loadData()
-    const id = setInterval(loadData, 10000)
-    return () => clearInterval(id)
+    loadNetworkData()
+    const interval = setInterval(() => {
+      loadData()
+      loadNetworkData()
+    }, 10000)
+    return () => clearInterval(interval)
   }, [])
 
-  // ── Derived ───────────────────────────────────────────
-  const activeInc  = incidents.filter(i => i.status === 'ACTIVE').length
-  const hpTriggers = hpStatus?.trigger_count || 0
-  const labRunning = labStatus?.active_scenario
-  const bcMode     = labStatus?.blockchain_mode || 'local'
-
-  const topCards = stats ? [
-    { label: 'FILES SCANNED',    value: stats.total_scanned,       color: C.blue,   icon: '📁' },
-    { label: 'RANSOMWARE',       value: stats.active_threats,      color: C.red,    icon: '🦠' },
-    { label: 'HIGH RISK',        value: stats.high_risk_alerts,    color: C.orange, icon: '⚠️' },
-    { label: 'SUSPICIOUS',       value: stats.medium_threats,      color: C.yellow, icon: '🟡' },
-    { label: 'ACTIVE INCIDENTS', value: activeInc,                 color: C.red,    icon: '🚨' },
-    { label: 'HONEYPOT HITS',    value: hpTriggers,                color: C.red,    icon: '🍯' },
-    { label: 'SYSTEM HEALTH',    value: `${stats.system_health}%`, color: C.green,  icon: '💚' },
-    { label: 'BLOCKCHAIN',       value: bcMode.toUpperCase(),      color: C.blue,   icon: '⛓' },
-  ] : []
-
-  const services = [
-    { name: 'ML Engine',    ok: true,                                 val: 'RF + DNN ONLINE' },
-    { name: 'Blockchain',   ok: true,                                 val: bcMode.toUpperCase() },
-    { name: 'File Monitor', ok: true,                                 val: 'watched/ ACTIVE' },
-    { name: 'Honeypot',     ok: labStatus?.honeypot_active !== false, val: `${hpTriggers} triggers` },
-    { name: 'Cyber Lab',    ok: true,                                 val: labRunning ? '🔴 SIM ACTIVE' : '🟢 READY' },
-    { name: 'WebSocket',    ok: !!socketRef.current?.connected,       val: socketRef.current?.connected ? 'LIVE' : 'OFFLINE' },
-  ]
-
-  // Heatmap
-  const dayMap = {}
-  threats.forEach(t => { const d = (t.timestamp || '').slice(0, 10); if (d) dayMap[d] = (dayMap[d] || 0) + 1 })
-  const today = new Date()
-  const allDays = Array.from({ length: 112 }, (_, i) => {
-    const d = new Date(today); d.setDate(today.getDate() - (111 - i))
-    return d.toISOString().slice(0, 10)
+  // ── Analytics Data ───────────────────────────────────────
+  const attackTypes = {}
+  incidents.forEach(i => {
+    const type = i.attack_type || 'Unknown'
+    attackTypes[type] = (attackTypes[type] || 0) + 1
   })
-  const weeks = []; for (let w = 0; w < 16; w++) weeks.push(allDays.slice(w * 7, w * 7 + 7))
-  const maxCount = Math.max(1, ...Object.values(dayMap))
-  const cellColor = (date) => {
-    const c = dayMap[date] || 0
-    if (!c) return '#0a0a1a'
-    const pct = c / maxCount
-    return pct > 0.7 ? C.red : pct > 0.35 ? C.orange : '#00ff8855'
-  }
+  const attackData = Object.entries(attackTypes).map(([name, value]) => ({ name, value }))
+
+  const protocolRows = connections.reduce((counts, connection) => {
+    const protocol = String(connection.protocol || connection.proto || 'OTHER').toUpperCase()
+    const key = ['TCP', 'UDP', 'ICMP'].includes(protocol) ? protocol : 'Other'
+    counts[key] = (counts[key] || 0) + 1
+    return counts
+  }, {})
+  const protocolData = ['TCP', 'UDP', 'ICMP', 'Other']
+    .map(name => ({ name, value: protocolRows[name] || 0 }))
+    .filter(item => item.value > 0)
+  const portCounts = connections.reduce((counts, connection) => {
+    const port = connection.dst_port || connection.local_port || connection.remote_port
+    if (port !== undefined && port !== null && String(port) !== '') {
+      const key = String(port)
+      counts[key] = (counts[key] || 0) + 1
+    }
+    return counts
+  }, {})
+  const topPorts = Object.entries(portCounts)
+    .map(([port, count]) => ({ port, count }))
+    .sort((a, b) => b.count - a.count)
+  const localIP = String(networkStats?.local_ip || '').split('%', 1)[0]
+  const verifiedLiveAlerts = networkAlerts.filter(alert => {
+    if (alert.is_verified !== true || alert.verification !== 'trained_network_ids') return false
+    const sourceIP = String(alert.attacker_ip || alert.src_ip || alert.ip || '').split('%', 1)[0].trim()
+    const normalizedIP = sourceIP.toLowerCase()
+    const isLoopback = normalizedIP === '::1' || normalizedIP === 'localhost' ||
+      normalizedIP.startsWith('127.') || normalizedIP.startsWith('::ffff:127.')
+    return sourceIP && normalizedIP !== 'unknown' && !isLoopback &&
+      normalizedIP !== localIP.toLowerCase() && !alert.scenario_id
+  })
+  const attackers = [...new Set(verifiedLiveAlerts.map(a => a.attacker_ip || a.src_ip || a.ip).filter(Boolean))]
+  const today = new Date().toDateString()
+  const attacksToday = verifiedLiveAlerts.filter(alert => {
+    const timestamp = alert.timestamp || alert.created_at
+    return timestamp && new Date(timestamp).toDateString() === today
+  }).length
 
   return (
-    <div style={{ minHeight: '100vh', background: C.bg, padding: 24, fontFamily: 'monospace' }}>
-
-      {/* ── Header ────────────────────────────────────── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+    <div style={{ minHeight: '100vh', background: C.bg, padding: 20, fontFamily: 'monospace' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
-          <h1 style={{ ...m(20, '#fff'), fontWeight: 'bold', letterSpacing: 4, margin: '0 0 4px' }}>
-            🛡️ CYBERDEFENSE AI — SOC PLATFORM
-          </h1>
-          <p style={{ ...m(10, C.muted), letterSpacing: 2, margin: 0 }}>
-            Welcome, <span style={{ color: C.blue }}>{username}</span>
-            {' '}— <span style={{ color: isAdmin ? C.red : C.blue }}>{role?.toUpperCase()}</span>
-            {labRunning && <span style={{ marginLeft: 16, color: C.red }}> 🔴 SIM ACTIVE</span>}
-            {liveIncident && <span style={{ marginLeft: 12, color: C.orange }}> 🚨 INCIDENT IN PROGRESS</span>}
-          </p>
+          <h1 style={{ ...m(24, C.blue), margin: 0, letterSpacing: 2 }}>CYBERDEFENSE SOC</h1>
+          <div style={{ ...m(11, C.muted), marginTop: 4 }}>Security Operations Center Dashboard</div>
         </div>
-        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-          {[
-            { to: '/threats',    label: '⚡ THREATS',   color: C.blue },
-            { to: '/soc',        label: '🖥 SOC',       color: C.green },
-            { to: '/lab',        label: '🔬 CYBER LAB', color: C.red },
-            { to: '/incidents',  label: '🚨 INCIDENTS', color: C.orange },
-            { to: '/network',    label: '🌐 NETWORK',   color: C.green },
-            { to: '/analytics',  label: '📊 ANALYTICS', color: C.blue },
-            { to: '/blockchain', label: '⛓ CHAIN',      color: C.blue },
-            { to: '/chat',       label: '🤖 AI',        color: C.purple },
-            { to: '/audit',      label: '📋 AUDIT',     color: C.purple },
-            ...(isAdmin ? [{ to: '/admin', label: '⚙️ ADMIN', color: C.red }] : []),
-          ].map(({ to, label, color }) => (
-            <Link key={to} to={to} style={navBtn(color)}
-              onMouseEnter={e => { e.target.style.background = color; e.target.style.color = '#000' }}
-              onMouseLeave={e => { e.target.style.background = 'transparent'; e.target.style.color = color }}>
-              {label}
-            </Link>
-          ))}
-          <button onClick={logout} style={navBtn(C.red)}
-            onMouseEnter={e => { e.target.style.background = C.red; e.target.style.color = '#000' }}
-            onMouseLeave={e => { e.target.style.background = 'transparent'; e.target.style.color = C.red }}>
-            🚪 LOGOUT
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Dot ok={true} pulse />
+            <span style={m(11, C.green)}>SYSTEM ONLINE</span>
+          </div>
+          <span style={m(11, C.muted)}>|</span>
+          <span style={m(11, C.text)}>{username}</span>
+          <button onClick={logout} style={{ padding: '6px 12px', background: C.red + '22', border: `1px solid ${C.red}`, borderRadius: 4, ...m(10, C.red), cursor: 'pointer' }}>
+            LOGOUT
           </button>
         </div>
       </div>
+      <WorkspaceSwitcher />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+        <Link
+          to="/ransomware-history"
+          style={{ padding: '7px 12px', border: `1px solid ${C.red}`, borderRadius: 4, ...m(10, C.red), textDecoration: 'none' }}
+        >
+          🧬 RANSOMWARE HISTORY
+        </Link>
+        <Link
+          to="/ransomware"
+          style={{ padding: '7px 12px', border: `1px solid ${C.blue}`, borderRadius: 4, ...m(10, C.blue), textDecoration: 'none' }}
+        >
+          OPEN RANSOMWARE CENTER
+        </Link>
+      </div>
 
       {loading ? (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300, flexDirection: 'column', gap: 16 }}>
-          <div style={{ fontSize: 40 }}>⚡</div>
-          <p style={{ ...m(12, C.blue), letterSpacing: 4 }}>LOADING SOC DATA...</p>
-        </div>
+        <div style={{ textAlign: 'center', padding: 60, ...m(14, C.muted) }}>Loading SOC data...</div>
       ) : (
         <>
-          {/* ════════════════════════════════════════════ */}
-          {/* LIVE INCIDENT CARD — shown on attack detect  */}
-          {/* ════════════════════════════════════════════ */}
-          {liveIncident && (
-            <LiveIncidentCard
-              incident={liveIncident}
-              onDismiss={() => setLiveIncident(null)}
-              navigate={navigate}
-            />
-          )}
-
-          {/* ════════════════════════════════════════════ */}
-          {/* TOP METRIC CARDS                            */}
-          {/* ════════════════════════════════════════════ */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8,1fr)', gap: 10, marginBottom: 16 }}>
-            {topCards.map((c, i) => (
-              <div key={i} style={{ ...cardStyle({ padding: 14 }), borderColor: c.color + '33', textAlign: 'center' }}>
-                <div style={{ fontSize: 18, marginBottom: 4 }}>{c.icon}</div>
-                <div style={{ ...m(20, c.color), fontWeight: 'bold', lineHeight: 1, textShadow: `0 0 10px ${c.color}66` }}>
-                  {c.value ?? '—'}
-                </div>
-                <div style={{ ...m(8, C.muted), letterSpacing: 2, marginTop: 4 }}>{c.label}</div>
-              </div>
-            ))}
+          {/* Overview Metrics */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+            <MetricCard label="ACTIVE CONNECTIONS" value={networkStats?.total_connections || connections.length || 0} color={C.blue} icon="🌐" />
+            <MetricCard label="ACTIVE THREATS" value={threats.filter(t => t.status === 'quarantined').length || 0} color={C.red} icon="🚨" />
+            <MetricCard label="CRITICAL ALERTS" value={verifiedLiveAlerts.filter(a => a.severity === 'CRITICAL').length} color={C.orange} icon="⚠️" />
+            <MetricCard label="UNIQUE ATTACKERS" value={new Set(verifiedLiveAlerts.map(a => a.attacker_ip || a.src_ip || a.ip)).size} color={C.purple} icon="👤" />
+            <MetricCard label="VERIFIED HONEYPOT HITS TODAY" value={hpHitsToday} color={C.yellow} icon="🍯" />
+            <MetricCard label="NETWORK ATTACKS TODAY" value={attacksToday} color={C.green} icon="📊" />
+            <MetricCard label="RISK SCORE" value={stats?.avg_risk_score?.toFixed(0) || 0} color={stats?.avg_risk_score > 50 ? C.red : C.green} icon="📈" />
+            <MetricCard label="PACKETS TODAY" value={networkStats?.packets_captured || 0} color={C.blue} icon="📦" />
           </div>
 
-          {/* ════════════════════════════════════════════ */}
-          {/* ROW 2: System | Live Alerts | Incidents     */}
-          {/* ════════════════════════════════════════════ */}
-          <div style={{ display: 'grid', gridTemplateColumns: '250px 1fr 300px', gap: 14, marginBottom: 14 }}>
-
-            {/* System Status */}
-            <div style={cardStyle()}>
-              <div style={sLabel}>SYSTEM STATUS</div>
-              {services.map((s, i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 9 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                    <Dot ok={s.ok} pulse={s.name === 'WebSocket' && s.ok} />
-                    <span style={m(10, '#aaa')}>{s.name}</span>
-                  </div>
-                  <span style={{ ...m(9, s.ok ? C.green : C.red), maxWidth: 110, textAlign: 'right' }}>{s.val}</span>
-                </div>
-              ))}
-              <div style={{ marginTop: 12, borderTop: `1px solid ${C.dim}`, paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <button onClick={() => navigate('/lab')} style={{
-                  padding: '7px', fontSize: 9, letterSpacing: 2, fontFamily: 'monospace',
-                  background: '#ff003c11', border: `1px solid ${C.red}`, borderRadius: 4, color: C.red, cursor: 'pointer',
-                }}>🔬 CYBER LAB</button>
-                <button onClick={() => navigate('/soc')} style={{
-                  padding: '7px', fontSize: 9, letterSpacing: 2, fontFamily: 'monospace',
-                  background: '#00ff8811', border: `1px solid ${C.green}`, borderRadius: 4, color: C.green, cursor: 'pointer',
-                }}>🖥 SOC WAR ROOM</button>
-              </div>
-            </div>
-
-            {/* Live Alerts Feed */}
-            <div style={{ ...cardStyle(), display: 'flex', flexDirection: 'column' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-                <div style={sLabel}>⚡ LIVE SECURITY ALERTS</div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Dot ok pulse />
-                  <span style={{ ...m(9, C.green), letterSpacing: 2 }}>LIVE</span>
-                </div>
-              </div>
-              {liveAlerts.length === 0 ? (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                  <div style={{ fontSize: 28 }}>🟢</div>
-                  <div style={m(11, C.muted)}>System nominal — no active alerts</div>
-                  <div style={{ ...m(9, '#1a1a2e') }}>Run a simulation or trigger a real attack to see live detection</div>
-                </div>
-              ) : liveAlerts.map((a, i) => (
-                <div key={i} style={{
-                  display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6,
-                  padding: '6px 8px', borderRadius: 4,
-                  background: i === 0 ? a.col + '11' : 'transparent',
-                  border: `1px solid ${i === 0 ? a.col + '44' : 'transparent'}`,
-                  transition: 'all 0.3s',
-                }}>
-                  <span style={{ ...m(9, C.muted), whiteSpace: 'nowrap', flexShrink: 0 }}>{a.ts}</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={m(10, a.col)}>{a.msg}</div>
-                    {a.src && <div style={{ ...m(9, C.muted), marginTop: 1 }}>{a.src}{a.geo ? ` — ${a.geo}` : ''}</div>}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Recent Incidents */}
-            <div style={{ ...cardStyle(), display: 'flex', flexDirection: 'column' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-                <div style={sLabel}>🚨 INCIDENTS</div>
-                <Link to="/incidents" style={{ ...m(9, C.blue), textDecoration: 'none' }}>VIEW ALL →</Link>
-              </div>
-              {incidents.length === 0 ? (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                  <div style={{ fontSize: 24 }}>✅</div>
-                  <div style={m(11, C.muted)}>No incidents</div>
-                  <button onClick={() => navigate('/lab')} style={{
-                    padding: '5px 12px', fontSize: 9, fontFamily: 'monospace', letterSpacing: 2,
-                    background: '#ff003c11', border: `1px solid ${C.red}`, borderRadius: 4, color: C.red, cursor: 'pointer',
-                  }}>RUN SIMULATION →</button>
-                </div>
-              ) : incidents.map((inc, i) => {
-                const col = SEV[inc.severity] || C.muted
-                return (
-                  <div key={i} onClick={() => navigate(`/incidents/${inc.id}`)} style={{
-                    display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8,
-                    padding: '7px 10px', borderRadius: 6, cursor: 'pointer',
-                    background: '#080818', border: `1px solid ${col}22`,
-                  }}>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: col, boxShadow: `0 0 5px ${col}` }} />
-                    <div style={{ flex: 1, overflow: 'hidden' }}>
-                      <div style={{ ...m(10, '#ccc'), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {inc.title || inc.attack_type}
-                      </div>
-                      <div style={{ ...m(9, C.muted), marginTop: 2 }}>
-                        {inc.source_ip || ''}{inc.source_ip ? ' • ' : ''}{(inc.created_at || '').slice(11, 19)}
-                        {inc.honeypot_hit ? ' 🍯' : ''}
-                      </div>
-                    </div>
-                    <div style={{ ...m(16, col), fontWeight: 'bold' }}>{Math.round(inc.risk_score || 0)}</div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-
-          {/* ════════════════════════════════════════════ */}
-          {/* ROW 3: Timeline + Honeypot + Lab           */}
-          {/* ════════════════════════════════════════════ */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: 14, marginBottom: 14 }}>
-            <div style={cardStyle()}>
-              <div style={sLabel}>📈 THREAT SCORE TIMELINE</div>
-              {stats?.timeline?.length > 0 ? (
-                <ResponsiveContainer width="100%" height={150}>
-                  <AreaChart data={[...stats.timeline].reverse()}>
-                    <defs>
-                      <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%"  stopColor={C.red} stopOpacity={0.35} />
-                        <stop offset="95%" stopColor={C.red} stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <XAxis dataKey="time" hide />
-                    <YAxis domain={[0, 100]} tick={{ fill: C.muted, fontSize: 9, fontFamily: 'monospace' }} />
-                    <Tooltip
-                      contentStyle={{ background: C.card, border: `1px solid ${C.border}`, fontFamily: 'monospace', fontSize: 11, color: '#fff' }}
-                      formatter={(v) => [v.toFixed(1), 'Score']}
-                      labelFormatter={() => ''}
-                    />
-                    <Area type="monotone" dataKey="score" stroke={C.red} strokeWidth={2}
-                      fill="url(#sg)" dot={false} activeDot={{ r: 4, fill: C.red }} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, ...m(11, C.muted) }}>
-                  No data yet — scan files or run a simulation
-                </div>
-              )}
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ ...cardStyle({ padding: 14 }), borderColor: '#ff003c33', flex: 1 }}>
-                <div style={sLabel}>🍯 HONEYPOT</div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={m(10, '#aaa')}>Decoy Files</span>
-                  <span style={{ ...m(14, C.blue), fontWeight: 'bold' }}>{hpStatus?.file_count || 7}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={m(10, '#aaa')}>Triggers</span>
-                  <span style={{ ...m(14, hpTriggers > 0 ? C.red : C.green), fontWeight: 'bold' }}>
-                    {hpTriggers > 0 ? `🔴 ${hpTriggers}` : '🟢 0'}
-                  </span>
-                </div>
-              </div>
-              <div style={{ ...cardStyle({ padding: 14 }), borderColor: labRunning ? '#ff003c33' : C.border, flex: 1 }}>
-                <div style={sLabel}>🔬 CYBER LAB</div>
-                <div style={{ ...m(10, labRunning ? C.red : C.green), marginBottom: 8 }}>
-                  {labRunning ? '🔴 SIMULATION RUNNING' : '🟢 READY'}
-                </div>
-                <button onClick={() => navigate('/lab')} style={{
-                  display: 'block', width: '100%', padding: '6px', fontSize: 9, letterSpacing: 2,
-                  fontFamily: 'monospace', background: '#ff003c11',
-                  border: `1px solid ${C.red}`, borderRadius: 4, color: C.red, cursor: 'pointer',
-                }}>OPEN LAB →</button>
-              </div>
-            </div>
-          </div>
-
-          {/* ════════════════════════════════════════════ */}
-          {/* ROW 4: Heatmap                             */}
-          {/* ════════════════════════════════════════════ */}
-          {threats.length > 0 && (
-            <div style={{ ...cardStyle(), marginBottom: 14 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-                <div style={sLabel}>📅 DETECTION HEATMAP — LAST 16 WEEKS</div>
-                <div style={{ display: 'flex', gap: 6, alignItems: 'center', ...m(9, C.muted) }}>
-                  LOW
-                  {['#00ff8855', C.orange, C.red].map(c => (
-                    <span key={c} style={{ width: 10, height: 10, background: c, borderRadius: 2, display: 'inline-block' }} />
-                  ))}
-                  HIGH
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: 3 }}>
-                {weeks.map((week, wi) => (
-                  <div key={wi} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                    {week.map(date => (
-                      <div key={date} title={`${date}: ${dayMap[date] || 0} detections`} style={{
-                        width: 13, height: 13, borderRadius: 2,
-                        background: cellColor(date),
-                        border: date === today.toISOString().slice(0, 10) ? `1px solid ${C.blue}` : '1px solid transparent',
-                        cursor: 'default', transition: 'transform 0.1s',
-                      }}
-                        onMouseEnter={e => e.target.style.transform = 'scale(1.3)'}
-                        onMouseLeave={e => e.target.style.transform = 'scale(1)'}
-                      />
-                    ))}
+          {/* Live Alert Ticker */}
+          {liveAlerts.length > 0 && (
+            <div style={{
+              background: '#0a0a1a', border: `1px solid ${C.border}`, borderRadius: 8,
+              padding: '10px 16px', marginBottom: 24, overflow: 'hidden',
+            }}>
+              <div style={{ ...m(9, C.muted), marginBottom: 8, letterSpacing: 2 }}>LIVE ALERTS</div>
+              <div style={{ maxHeight: 100, overflow: 'auto' }}>
+                {liveAlerts.map((alert, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 0', borderBottom: '1px solid #111' }}>
+                    <span style={{ ...m(9, '#666'), minWidth: 60 }}>{alert.ts}</span>
+                    <span style={{ ...m(10, alert.col), fontWeight: 'bold' }}>{alert.msg}</span>
+                    {alert.src && <span style={m(9, C.blue)}>{alert.src}</span>}
+                    {alert.geo && <span style={m(9, C.muted)}>{alert.geo}</span>}
                   </div>
                 ))}
               </div>
-              <div style={{ marginTop: 8, ...m(9, '#333') }}>
-                {Object.values(dayMap).reduce((a, b) => a + b, 0)} total detections across {Object.keys(dayMap).length} active days
-              </div>
             </div>
           )}
 
-          {/* ════════════════════════════════════════════ */}
-          {/* ROW 5: Security Events + File Scans        */}
-          {/* ════════════════════════════════════════════ */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+          {/* Network Flows Section */}
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginBottom: 24 }}>
             <div style={cardStyle()}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-                <div style={sLabel}>🔴 SECURITY EVENTS</div>
-                <span style={{ ...m(9, C.muted) }}>{secEvents.length}</span>
-              </div>
-              {secEvents.length === 0 ? (
-                <div style={{ ...m(10, C.muted), textAlign: 'center', padding: '16px 0' }}>
-                  No events. <button onClick={() => navigate('/lab')} style={{ background: 'none', border: 'none', color: C.red, cursor: 'pointer', fontFamily: 'monospace', fontSize: 10 }}>Run a simulation →</button>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={sLabel}>📦 LIVE PACKET CAPTURE (WIREHARK-LIKE)</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <span style={m(10, C.green)}>{packets.length} Packets</span>
+                  <span style={m(10, C.orange)}>{connections.filter(c => c.direction === 'IN').length} IN</span>
+                  <span style={m(10, C.purple)}>{connections.filter(c => c.direction === 'OUT').length} OUT</span>
                 </div>
-              ) : secEvents.slice(0, 8).map((ev, i) => {
-                const col = SEV[ev.severity] || C.muted
-                return (
-                  <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 5, alignItems: 'baseline' }}>
-                    <span style={{ ...m(9, C.muted), whiteSpace: 'nowrap' }}>{(ev.timestamp || '').slice(11, 19)}</span>
-                    <span style={{ ...m(8, col), padding: '1px 5px', background: col + '22', borderRadius: 2, whiteSpace: 'nowrap' }}>{ev.severity}</span>
-                    <span style={{ ...m(9, '#777'), whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{ev.event_type}</span>
-                    <span style={{ ...m(9, '#aaa'), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.description}</span>
-                  </div>
-                )
-              })}
+              </div>
+              {!['scapy', 'tshark'].includes(networkStats?.capture_mode) && (
+                <div style={{ ...m(9, C.yellow), marginBottom: 10 }}>
+                  Packet capture unavailable; showing live OS connections ({networkStats?.capture_mode || 'starting'}).
+                  Run the backend as Administrator with Npcap for packet-level capture.
+                </div>
+              )}
+              <div style={{ maxHeight: 340, overflow: 'auto' }}>
+                <div style={{
+                  position: 'sticky',
+                  top: 0,
+                  zIndex: 1,
+                  borderBottom: '1px solid #222',
+                  padding: '8px 12px',
+                  display: 'grid',
+                  gridTemplateColumns: packetGridColumns,
+                  minWidth: 900,
+                  gap: 10,
+                  background: C.card,
+                }}>
+                  <span style={m(9, C.muted)}>NO.</span>
+                  <span style={m(9, C.muted)}>SOURCE</span>
+                  <span style={m(9, C.muted)}>DESTINATION</span>
+                  <span style={m(9, C.muted)}>PROTO</span>
+                  <span style={m(9, C.muted)}>LEN</span>
+                  <span style={m(9, C.muted)}>TIME</span>
+                  <span style={m(9, C.muted)}>INFO</span>
+                </div>
+                {connections.slice(0, 30).map((flow, i) => (
+                  <NetworkFlowRow key={flow.number || `${flow.src_ip}-${flow.src_port}-${i}`} flow={flow} onClick={(f) => {
+                    if (f.risk_score > 50 || f.isSuspicious) {
+                      setSelectedAttackerIP(f.src_ip || f.remote_ip)
+                    }
+                  }} />
+                ))}
+              </div>
             </div>
 
             <div style={cardStyle()}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-                <div style={sLabel}>🔍 FILE SCANNER</div>
-                <Link to="/threats" style={{ ...m(9, C.blue), textDecoration: 'none' }}>VIEW ALL →</Link>
+              <div style={sLabel}>PROTOCOL STATS</div>
+              <div style={{ height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={protocolData.length ? protocolData : [{ name: 'No traffic', value: 1 }]}
+                      cx="50%" cy="50%" outerRadius={60} fill="#888" label
+                    >
+                      <Cell fill={C.blue} />
+                      <Cell fill={C.green} />
+                      <Cell fill={C.orange} />
+                      <Cell fill={C.muted} />
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
               </div>
-              {threats.length === 0 ? (
-                <div style={{ ...m(10, C.muted), textAlign: 'center', padding: '16px 0' }}>
-                  No scans. <Link to="/threats" style={{ color: C.blue }}>Scan a file</Link> or run a simulation.
-                </div>
-              ) : threats.slice(0, 7).map((t, i) => {
-                const col = t.prediction === 'Ransomware' ? C.red : t.prediction === 'Suspicious' ? C.orange : C.green
-                return (
-                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 7 }}>
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: col, flexShrink: 0 }} />
-                    <div style={{ flex: 1, overflow: 'hidden' }}>
-                      <div style={{ ...m(10, '#ccc'), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.file_name}</div>
-                      <ScoreBar score={t.threat_score || 0} />
-                    </div>
-                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                      <div style={{ ...m(11, col), fontWeight: 'bold' }}>{(t.threat_score || 0).toFixed(1)}</div>
-                      <div style={{ ...m(8, col) }}>{t.prediction}</div>
-                    </div>
+
+              <div style={{ ...sLabel, marginTop: 24 }}>TOP PORTS</div>
+              <div style={{ maxHeight: 150, overflow: 'auto' }}>
+                {topPorts.slice(0, 10).map((p, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #111' }}>
+                    <span style={m(10, C.blue)}>{p.port}</span>
+                    <span style={m(10, C.muted)}>{p.count} conns</span>
                   </div>
-                )
+                ))}
+                {topPorts.length === 0 && <div style={m(10, C.muted)}>No port data yet</div>}
+              </div>
+            </div>
+          </div>
+
+          {/* Security Alerts Section */}
+          <div style={cardStyle({ marginBottom: 24 })}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={sLabel}>VERIFIED LIVE NETWORK ALERTS</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <span style={m(10, C.red)}>{verifiedLiveAlerts.filter(a => a.severity === 'CRITICAL').length} Critical</span>
+                <span style={m(10, C.orange)}>{verifiedLiveAlerts.filter(a => a.severity === 'HIGH').length} High</span>
+                <span style={m(10, C.yellow)}>{verifiedLiveAlerts.filter(a => a.severity === 'MEDIUM').length} Medium</span>
+              </div>
+            </div>
+            <div style={{ borderBottom: '1px solid #222', paddingBottom: 8, marginBottom: 8, display: 'grid', gridTemplateColumns: '100px 140px 140px 120px 80px 80px 100px', gap: 10 }}>
+              <span style={m(9, C.muted)}>SEVERITY</span>
+              <span style={m(9, C.muted)}>ATTACK TYPE</span>
+              <span style={m(9, C.muted)}>ATTACKER IP</span>
+              <span style={m(9, C.muted)}>TARGET IP</span>
+              <span style={m(9, C.muted)}>PORT</span>
+              <span style={m(9, C.muted)}>CONFIDENCE</span>
+              <span style={m(9, C.muted)}>TIME</span>
+            </div>
+            <div style={{ maxHeight: 300, overflow: 'auto' }}>
+              {verifiedLiveAlerts.length === 0 ? (
+                <div style={{ ...m(10, C.muted), padding: 24, textAlign: 'center' }}>
+                  No verified live network alerts. Historical incidents remain available in Incident Management.
+                </div>
+              ) : verifiedLiveAlerts.slice(0, 30).map((alert, i) => {
+                // Map backend alert format to frontend format
+                const mappedAlert = {
+                  severity: alert.severity || 'MEDIUM',
+                  attack_type: alert.attack_type || alert.type || 'Unknown',
+                  attacker_ip: alert.attacker_ip || alert.ip || alert.src_ip || 'Unknown',
+                  target_ip: alert.target_ip || alert.dst_ip || alert.extra?.target_ip || 'Unknown',
+                  target_port: alert.target_port || alert.port || alert.extra?.target_port || '-',
+                  confidence: alert.confidence || 0,
+                  timestamp: alert.timestamp || alert.created_at || new Date().toISOString(),
+                }
+                return <AlertRow key={i} alert={mappedAlert} onClick={(a) => setSelectedAttackerIP(a.attacker_ip)} />
               })}
             </div>
           </div>
 
-          {/* ════════════════════════════════════════════ */}
-          {/* ROW 6: Full Detection Log                  */}
-          {/* ════════════════════════════════════════════ */}
-          <div style={cardStyle()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14 }}>
-              <div style={sLabel}>📋 DETECTION LOG</div>
-              <Link to="/threats" style={{ ...m(9, C.blue), textDecoration: 'none' }}>FULL PAGE →</Link>
+          {/* Attacker Intelligence & Honeypot Section */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
+            <div style={cardStyle()}>
+              <div style={sLabel}>DETECTED ATTACKERS</div>
+              <div style={{ maxHeight: 300, overflow: 'auto' }}>
+                {attackers.map((ip, i) => (
+                  <div
+                    key={i}
+                    onClick={() => setSelectedAttackerIP(ip)}
+                    style={{
+                      padding: '12px 16px', borderBottom: '1px solid #111',
+                      cursor: 'pointer', display: 'flex', justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <div>
+                      <div style={{ ...m(12, C.blue), fontWeight: 'bold' }}>{ip}</div>
+                      <div style={m(9, C.muted)}>
+                        {verifiedLiveAlerts.filter(a => (a.attacker_ip || a.src_ip || a.ip) === ip).length} verified alerts
+                      </div>
+                    </div>
+                    <button style={{ padding: '6px 12px', background: C.blue + '22', border: `1px solid ${C.blue}`, borderRadius: 4, ...m(10, C.blue), cursor: 'pointer' }}>
+                      VIEW PROFILE
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', ...m(11) }}>
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${C.dim}` }}>
-                    {['FILE', 'PREDICTION', 'SCORE', 'RISK', 'MITRE', 'AI SUMMARY', 'TIMESTAMP'].map(h => (
-                      <th key={h} style={{ ...m(9, C.muted), textAlign: 'left', padding: '7px 12px', letterSpacing: 2, fontWeight: 'normal' }}>
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {threats.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} style={{ textAlign: 'center', padding: 32, ...m(11, C.muted) }}>
-                        No detections — <Link to="/threats" style={{ color: C.blue }}>scan a file</Link>
-                        {' '}or <button onClick={() => navigate('/lab')} style={{ background: 'none', border: 'none', color: C.red, cursor: 'pointer', fontFamily: 'monospace', fontSize: 11 }}>start a simulation</button>
-                      </td>
-                    </tr>
-                  ) : threats.map((t, i) => {
-                    const sc = t.threat_score > 70 ? C.red : t.threat_score > 30 ? C.orange : C.green
-                    const pc = t.prediction === 'Ransomware' ? C.red : t.prediction === 'Suspicious' ? C.orange : C.green
-                    const rc = { HIGH: C.red, MEDIUM: C.orange, LOW: C.green }[t.risk_level] || C.muted
-                    let mt = []
-                    try { mt = JSON.parse(t.mitre_tactics || '[]') } catch {}
-                    return (
-                      <tr key={i} style={{ borderBottom: `1px solid ${C.dim}` }}
-                        onMouseEnter={e => e.currentTarget.style.background = '#0d0d1a'}
-                        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                        <td style={{ padding: '8px 12px', color: '#ccc', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.file_name}</td>
-                        <td style={{ padding: '8px 12px', color: pc, fontWeight: 'bold' }}>{t.prediction}</td>
-                        <td style={{ padding: '8px 12px', color: sc, fontWeight: 'bold', textShadow: `0 0 6px ${sc}44` }}>{(t.threat_score || 0).toFixed(1)}</td>
-                        <td style={{ padding: '8px 12px' }}>
-                          <span style={{ padding: '2px 7px', borderRadius: 3, background: rc + '22', border: `1px solid ${rc}44`, ...m(9, rc), letterSpacing: 1 }}>
-                            {t.risk_level || '—'}
-                          </span>
-                        </td>
-                        <td style={{ padding: '8px 12px' }}>
-                          {mt.slice(0, 2).map(mm => (
-                            <a key={mm.id} href={mm.url} target="_blank" rel="noreferrer"
-                              style={{ display: 'block', color: C.purple, fontSize: 9, textDecoration: 'none' }} title={mm.name}>
-                              {mm.id}
-                            </a>
-                          ))}
-                          {mt.length === 0 && <span style={{ color: C.muted }}>—</span>}
-                        </td>
-                        <td style={{ padding: '8px 12px', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {t.ai_summary ? <span style={m(9, '#888')}>{t.ai_summary.slice(0, 65)}{t.ai_summary.length > 65 ? '…' : ''}</span> : <span style={{ color: C.muted }}>—</span>}
-                        </td>
-                        <td style={{ padding: '8px 12px', ...m(9, C.muted), whiteSpace: 'nowrap' }}>
-                          {(t.timestamp || '').slice(0, 19).replace('T', ' ')}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+
+            <div style={cardStyle()}>
+              <div style={sLabel}>HONEYPOT STATUS</div>
+              {hpStatus ? (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ marginBottom: 12 }}>
+                    <span style={m(9, C.muted)}>STATUS</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                      <Dot ok={hpStatus.active} pulse />
+                      <span style={{ ...m(11, hpStatus.active ? C.green : C.red), fontWeight: 'bold' }}>
+                        {hpStatus.active ? 'ACTIVE' : 'INACTIVE'}
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <span style={m(9, C.muted)}>DECOY FILES</span>
+                    <div style={m(11, C.text)}>{hpStatus.file_count || 0}</div>
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <span style={m(9, C.muted)}>VERIFIED HITS TODAY</span>
+                    <div style={m(11, C.orange)}>{hpHitsToday}</div>
+                  </div>
+                </div>
+              ) : (
+                <div style={m(10, C.muted)}>No honeypot status</div>
+              )}
+
+              <div style={{ ...sLabel, marginTop: 24 }}>HONEYPOT TRIGGERS</div>
+              <div style={{ ...m(9, C.muted), marginBottom: 8 }}>
+                Only attributed OPEN, READ, or DELETE interactions are counted. Writes, unknown processes, and simulations are excluded.
+              </div>
+              <div style={{ maxHeight: 200, overflow: 'auto' }}>
+                {hpTriggers.length === 0 ? (
+                  <div style={{ ...m(10, C.muted), padding: 12 }}>No verified honeypot interactions recorded.</div>
+                ) : hpTriggers.slice(0, 10).map((t, i) => (
+                    <div key={t.event_id || i} style={{ padding: '12px 16px', borderBottom: '1px solid #111', background: '#1a000022' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <span style={{ ...m(11, C.red), fontWeight: 'bold' }}>{t.resource || 'Unknown'}</span>
+                        <span style={m(9, '#666')}>{new Date(t.timestamp).toLocaleString()}</span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                        <div>
+                          <span style={m(9, C.muted)}>SOURCE IP</span>
+                          <div style={m(10, C.blue)}>{t.source_ip || 'Local file access'}</div>
+                        </div>
+                        <div>
+                          <span style={m(9, C.muted)}>PROCESS</span>
+                          <div style={m(10, C.text)}>{t.process_name}</div>
+                        </div>
+                      </div>
+                    </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Analytics Section */}
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginBottom: 24 }}>
+            <div style={cardStyle()}>
+              <div style={sLabel}>ATTACK TYPES DISTRIBUTION</div>
+              <div style={{ height: 250 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={attackData}>
+                    <XAxis dataKey="name" style={{ fontSize: 10, fill: C.muted }} />
+                    <YAxis style={{ fontSize: 10, fill: C.muted }} />
+                    <Tooltip />
+                    <Bar dataKey="value" fill={C.blue} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div style={cardStyle()}>
+              <div style={sLabel}>ATTACK TIMELINE</div>
+              <div style={{ height: 250 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={incidents.slice(0, 20).map(i => ({
+                    time: new Date(i.created_at).toLocaleTimeString(),
+                    risk: i.risk_score || 0,
+                  }))}>
+                    <XAxis dataKey="time" style={{ fontSize: 10, fill: C.muted }} />
+                    <YAxis style={{ fontSize: 10, fill: C.muted }} />
+                    <Tooltip />
+                    <Area type="monotone" dataKey="risk" stroke={C.red} fill={C.red + '33'} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div style={cardStyle()}>
+              <div style={sLabel}>TOP ATTACKERS</div>
+              <div style={{ maxHeight: 200, overflow: 'auto' }}>
+                {Object.entries(
+                  incidents.reduce((acc, i) => {
+                    const ip = i.attacker?.ip
+                    if (ip) acc[ip] = (acc[ip] || 0) + 1
+                    return acc
+                  }, {})
+                )
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 10)
+                  .map(([ip, count], i) => (
+                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid #111' }}>
+                      <span style={m(10, C.blue)}>{ip}</span>
+                      <span style={m(10, C.muted)}>{count} attacks</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            <div style={cardStyle()}>
+              <div style={sLabel}>TARGETED PORTS</div>
+              <div style={{ maxHeight: 200, overflow: 'auto' }}>
+                {Object.entries(
+                  incidents.reduce((acc, i) => {
+                    const port = i.network?.target_port
+                    if (port) acc[port] = (acc[port] || 0) + 1
+                    return acc
+                  }, {})
+                )
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 10)
+                  .map(([port, count], i) => (
+                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid #111' }}>
+                      <span style={m(10, C.green)}>{port}</span>
+                      <span style={m(10, C.muted)}>{count} times</span>
+                    </div>
+                  ))}
+              </div>
             </div>
           </div>
         </>
       )}
 
+      {/* Attacker Profile Panel */}
+      {selectedAttackerIP && (
+        <AttackerProfile
+          ip={selectedAttackerIP}
+          intel={attackerIntel}
+          loading={attackerIntelLoading}
+          error={attackerIntelError}
+          onRetry={() => setAttackerIntelRetry(value => value + 1)}
+          onClose={() => { setSelectedAttackerIP(null); setAttackerIntel(null) }}
+        />
+      )}
+
+      {/* Live Incident Card */}
+      {liveIncident && (
+        <div style={{
+          position: 'fixed', bottom: 20, right: 20, width: 400,
+          background: 'rgba(0,0,10,0.98)', border: `2px solid ${SEV[liveIncident.severity] || C.orange}`,
+          borderRadius: 12, padding: 16, zIndex: 999,
+          boxShadow: `0 0 40px ${SEV[liveIncident.severity] || C.orange}44`,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <span style={{ ...m(12, SEV[liveIncident.severity] || C.orange), fontWeight: 'bold' }}>
+              {liveIncident.scenario_id ? '🧪 LAB SIMULATION' : '🚨 MODEL-VERIFIED INCIDENT'}
+            </span>
+            <button onClick={() => setLiveIncident(null)} style={{ background: 'transparent', border: 'none', color: C.muted, cursor: 'pointer' }}>✕</button>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <span style={m(9, C.muted)}>ATTACK TYPE</span>
+            <div style={m(11, C.text)}>{liveIncident.attack_type?.replace(/_/g, ' ') || 'Unknown'}</div>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <span style={m(9, C.muted)}>ATTACKER IP</span>
+            <div style={m(11, C.blue)}>{liveIncident.attacker?.ip || 'Unknown'}</div>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <span style={m(9, C.muted)}>RISK SCORE</span>
+            <div style={{ ...m(14, liveIncident.risk_score > 50 ? C.red : C.green), fontWeight: 'bold' }}>
+              {liveIncident.risk_score?.toFixed(0) || 0}/100
+            </div>
+          </div>
+          <button
+            onClick={() => navigate(`/incidents/${liveIncident.incident_id}`)}
+            style={{ width: '100%', padding: '8px', background: C.blue + '22', border: `1px solid ${C.blue}`, borderRadius: 4, ...m(10, C.blue), cursor: 'pointer', marginTop: 8 }}
+          >
+            VIEW DETAILS
+          </button>
+        </div>
+      )}
+
       <style>{`
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-        @keyframes scanLine { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
-        @keyframes incidentIn { from{opacity:0;transform:translateY(-12px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.4; }
+        }
       `}</style>
     </div>
   )

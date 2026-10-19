@@ -2,7 +2,6 @@ import os
 import json
 import pickle
 import numpy as np
-import random
 from datetime import datetime
 
 import torch
@@ -108,68 +107,7 @@ def _infer_dl_ransomware_orientation() -> bool:
     return ransom_out >= benign_out
 
 
-def _is_strong_benign_pattern(features: dict) -> bool:
-    """Conservative benign signature used as a false-positive guardrail."""
-    sections = int(features.get('NumberOfSections', 0) or 0)
-    dll_chars = int(features.get('DllCharacteristics', 0) or 0)
-    stack = int(features.get('SizeOfStackReserve', 0) or 0)
-    iat = int(features.get('IatVRA', 0) or 0)
-    resource = int(features.get('ResourceSize', 0) or 0)
-    btc = int(features.get('BitcoinAddresses', 0) or 0)
 
-    safe_dll_chars = {33088, 34112, 34368, 0x8540}
-    return (
-        btc == 0 and
-        2 <= sections <= 5 and
-        dll_chars in safe_dll_chars and
-        stack >= 1048576 and
-        iat > 0 and
-        resource > 0
-    )
-
-
-def _is_strong_suspicious_pattern(features: dict) -> bool:
-    """Detect suspicious/medium-threat pattern (packed, obfuscated, unknown)."""
-    sections = int(features.get('NumberOfSections', 0) or 0)
-    dll_chars = int(features.get('DllCharacteristics', 0) or 0)
-    stack = int(features.get('SizeOfStackReserve', 0) or 0)
-    debug_size = int(features.get('DebugSize', 0) or 0)
-    export_size = int(features.get('ExportSize', 0) or 0)
-    btc = int(features.get('BitcoinAddresses', 0) or 0)
-
-    return (
-        btc == 0 and
-        5 <= sections <= 7 and
-        dll_chars in {0, 256, 8192, 34112} and
-        131072 <= stack <= 1048576 and
-        0 < debug_size < 256 and
-        export_size == 0
-    )
-
-
-def _is_strong_ransomware_pattern(features: dict) -> bool:
-    """Detect ransomware/high-threat pattern (encryption, obfuscation, abnormal structure)."""
-    sections = int(features.get('NumberOfSections', 0) or 0)
-    dll_chars = int(features.get('DllCharacteristics', 0) or 0)
-    stack = int(features.get('SizeOfStackReserve', 0) or 0)
-    btc = int(features.get('BitcoinAddresses', 0) or 0)
-    resource = int(features.get('ResourceSize', 0) or 0)
-    iat = int(features.get('IatVRA', 0) or 0)
-
-    return (
-        (btc == 1 or dll_chars == 0 or (sections > 6 or sections < 2)) and
-        stack < 1048576 and
-        iat > 0
-    )
-
-
-def _random_score_for_level(risk_level: str) -> float:
-    """Return a randomized score within a fixed range for the given risk level."""
-    if risk_level == 'HIGH':
-        return round(random.uniform(70.0, 99.99), 2)
-    if risk_level == 'MEDIUM':
-        return round(random.uniform(30.0, 69.99), 2)
-    return round(random.uniform(8.0, 24.99), 2)
 
 
 RF_RANSOMWARE_INDEX = _infer_rf_ransomware_index()
@@ -204,9 +142,8 @@ def predict(features: dict) -> dict:
     combined = (0.85 * rf_ransomware_prob) + (0.15 * dl_ransomware_prob)
 
     # ── Classification-aware scoring ──────────────────────
-    # The RF model achieves 99.62% accuracy at the 0.5 threshold, but raw
-    # probabilities cluster around 0.45-0.55 for most ransomware (calibration
-    # artefact of voting forests). Scale based on the binary classification:
+    # The RF model achieves 99.62% accuracy at the 0.5 threshold
+    # Scale based on the binary classification:
     #   RF says RANSOMWARE → HIGH range  (70-100)
     #   RF says BENIGN     → original raw probability scale (0-100)
     rf_class = 1 if rf_ransomware_prob >= 0.5 else 0
@@ -214,15 +151,6 @@ def predict(features: dict) -> dict:
         threat_score = round(min(70.0 + rf_ransomware_prob * 30.0, 100.0), 2)
     else:
         threat_score = round(min(combined * 100.0, 100.0), 2)
-
-    # Randomized boundary scoring for all risk levels.
-    # Keep scores realistic and varied within their respective thresholds.
-    if _is_strong_benign_pattern(features):
-        threat_score = round(float(np.random.uniform(8.0, 24.99)), 2)
-    elif _is_strong_suspicious_pattern(features):
-        threat_score = round(float(np.random.uniform(30.0, 69.99)), 2)
-    elif _is_strong_ransomware_pattern(features):
-        threat_score = round(float(np.random.uniform(70.0, 99.99)), 2)
 
     # ── Risk level ────────────────────────────────────────
     if threat_score > 70:
@@ -234,10 +162,6 @@ def predict(features: dict) -> dict:
     else:
         risk_level = 'LOW'
         prediction = 'Benign'
-
-    # Replace the raw model score with a randomized score inside the fixed band
-    # so repeated scans show variation while keeping the same severity boundary.
-    threat_score = _random_score_for_level(risk_level)
 
     # ── Top 3 contributing features ───────────────────────
     top_features = list(shap_values.keys())[:3]

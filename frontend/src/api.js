@@ -2,6 +2,9 @@ import axios from 'axios'
 
 const BASE = 'http://localhost:5000/api'
 
+// Never let a dashboard request keep the whole page in a loading state.
+axios.defaults.timeout = 10000
+
 const getHeaders = () => ({
   Authorization: `Bearer ${localStorage.getItem('token')}`
 })
@@ -13,8 +16,6 @@ export const getThreats = ()  => axios.get(`${BASE}/threats`, { headers: getHead
 export const getSHAP    = ()  => axios.get(`${BASE}/shap`,    { headers: getHeaders() })
 export const predict    = (f) => axios.post(`${BASE}/predict`, { features: f }, { headers: getHeaders() })
 export const getAuditLogs = () => axios.get(`${BASE}/audit-log`, { headers: getHeaders() })
-export const getNetworkAuditLogs = (limit = 500) =>
-  axios.get(`${BASE}/network/audit-log`, { params: { limit }, headers: getHeaders() })
 
 export const uploadScan = (file) => {
   const form = new FormData()
@@ -90,3 +91,17 @@ export const enrichIP          = (ip)   => axios.get(`${BASE}/intel/ip/${encodeU
 export const checkAbuseIPDB    = (ip)   => axios.get(`${BASE}/intel/ip/${encodeURIComponent(ip)}/abuse`,   { headers: getHeaders() })
 export const checkShodan       = (ip)   => axios.get(`${BASE}/intel/ip/${encodeURIComponent(ip)}/shodan`,  { headers: getHeaders() })
 export const checkVirusTotal   = (hash) => axios.get(`${BASE}/intel/hash/${hash}`,    { headers: getHeaders() })
+
+// ── New: Network Stats ─────────────────────────────────────
+export const getNetworkStats = () => axios.get(`${BASE}/network/stats`, { headers: getHeaders() })
+export const getCaptureStatus = () => axios.get(`${BASE}/capture/status`, { headers: getHeaders() })
+export const getNetworkAlerts = () => axios.get(`${BASE}/network/alerts`, { headers: getHeaders() })
+export const getVerifiedNetworkAlerts = () => axios.get(`${BASE}/alerts`, { headers: getHeaders() })
+export const getNetworkConnections = () => axios.get(`${BASE}/network/connections`, { headers: getHeaders() })
+export const getNetworkPackets = () => axios.get(`${BASE}/network/packets`, { headers: getHeaders() })
+export const getNetworkAuditLogs = (limit = 500) =>
+  axios.get(`${BASE}/network/audit-log`, { params: { limit }, headers: getHeaders() })
+
+// ── System Health ──────────────────────────────────────────
+export const getSystemHealth = () => axios.get(`${BASE}/system/health`, { headers: getHeaders() })
+export const getAdminSettings = () => axios.get(`${BASE}/admin/settings`, { headers: getHeaders() })

@@ -80,7 +80,7 @@ export default function Network() {
     try {
       const [sRes, aRes, cRes, pRes] = await Promise.all([
         axios.get(`${API}/api/network/stats`,       { headers }),
-        axios.get(`${API}/api/network/alerts`,      { headers }),
+        axios.get(`${API}/api/alerts`,              { headers }),
         axios.get(`${API}/api/network/connections`, { headers }),
         axios.get(`${API}/api/network/packets`,     { headers }),
       ])
@@ -100,7 +100,7 @@ export default function Network() {
     if (!token) { navigate('/'); return }
     fetchAll()
     const interval = setInterval(fetchAll, 5000)   // poll every 5s for REST fallback
-    const socket = io(API, { transports: ['websocket'], reconnection: true })
+    const socket = io(API, { transports: ['polling'], reconnection: true })
     socketRef.current = socket
     socket.on('network_update', (data) => {
       setConns(data.connections || [])
@@ -115,17 +115,28 @@ export default function Network() {
         })
       }
     })
-    socket.on('network_alert', (data) => setLiveAlerts(p => [data, ...p].slice(0, 50)))
+    socket.on('network_alert', (data) => {
+      const isVerified = data.is_verified === true && data.verification === 'trained_network_ids'
+      if (!isVerified && !data.scenario_id) return
+      const displayedAlert = isVerified ? data : {
+        ...data,
+        type: `SIMULATION · ${data.type || data.attack_type || 'NETWORK EVENT'}`,
+      }
+      setLiveAlerts(p => [displayedAlert, ...p].slice(0, 50))
+    })
     socket.on('network_audit_event', (data) => setNetAuditLogs(p => [data, ...p].slice(0, 500)))
-    // Live incident from real attack or simulation
+    // Lab scenarios remain visible but do not enter the verified alert feed.
     socket.on('live_incident', (data) => {
+      const isSimulation = Boolean(data.scenario_id)
+      if (!isSimulation && (data.is_verified !== true || data.verification !== 'trained_network_ids')) return
       setLiveIncident(data)
       setLiveAlerts(p => [{
         timestamp: data.timestamp,
-        type:      data.attack_type,
+        type:      `${isSimulation ? 'SIMULATION · ' : ''}${data.attack_type}`,
         ip:        (data.attacker || {}).ip || '',
         severity:  data.severity,
         description: data.description,
+        scenario_id: data.scenario_id,
       }, ...p].slice(0, 50))
     })
     return () => { clearInterval(interval); socket.disconnect() }
@@ -150,12 +161,29 @@ export default function Network() {
 
   const allAlerts = useMemo(() => {
     const seen = new Set()
-    return [...liveAlerts, ...alerts].filter(a => {
-      const k = `${a.timestamp}-${a.type}-${a.ip}`
+    return [...liveAlerts, ...alerts].map(alert => ({
+      ...alert,
+      type: alert.type || alert.attack_type || alert.prediction || 'UNKNOWN',
+      ip: alert.ip || alert.attacker_ip || alert.src_ip || '—',
+      description: alert.description || (
+        alert.prediction
+          ? `Trained network IDS classified ${alert.prediction} with ${alert.confidence || 0}% confidence`
+          : 'Network activity'
+      ),
+    })).filter(a => {
+      const k = a.id || `${a.timestamp}-${a.type}-${a.ip}-${a.target_ip || ''}`
       if (seen.has(k)) return false
       seen.add(k); return true
     }).slice(0, 50)
   }, [liveAlerts, alerts])
+  const verifiedAlerts = useMemo(
+    () => allAlerts.filter(a => a.is_verified === true && a.verification === 'trained_network_ids'),
+    [allAlerts]
+  )
+  const verifiedAttackerCount = useMemo(
+    () => new Set(verifiedAlerts.map(a => a.attacker_ip || a.src_ip || a.ip).filter(Boolean)).size,
+    [verifiedAlerts]
+  )
 
   const filteredConns = useMemo(() => {
     let list = [...conns]
@@ -330,7 +358,8 @@ export default function Network() {
                 <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ff003c',
                   display: 'inline-block', boxShadow: '0 0 10px #ff003c', animation: 'pulse 0.8s infinite' }} />
                 <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#fff', fontWeight: 700, letterSpacing: 3 }}>
-                  🚨 LIVE ATTACK — {(liveIncident.attack_type || '').replace(/_/g, ' ')}
+                  {liveIncident.scenario_id ? '🧪 LAB SIMULATION — ' : '🚨 MODEL-VERIFIED ATTACK — '}
+                  {(liveIncident.attack_type || '').replace(/_/g, ' ')}
                 </span>
                 <span style={{
                   padding: '2px 10px', borderRadius: 3, fontFamily: 'monospace', fontSize: 10, fontWeight: 700, letterSpacing: 2,
@@ -503,8 +532,8 @@ export default function Network() {
           {[
             { label: 'ACTIVE CONNECTIONS', val: stats.total_connections, color: '#00d4ff' },
             { label: 'EXTERNAL IPs',       val: externalIPs.length,      color: '#a78bfa' },
-            { label: 'SUSPICIOUS IPs',     val: stats.suspicious_ips,    color: '#ff003c' },
-            { label: 'ALERTS',             val: (stats.alerts_today || 0) + liveAlerts.length, color: '#ff6b00' },
+            { label: 'VERIFIED ATTACKERS', val: verifiedAttackerCount,   color: '#ff003c' },
+            { label: 'VERIFIED ATTACKS',   val: verifiedAlerts.length,   color: '#ff6b00' },
             { label: 'MB SENT',            val: stats.bytes_sent_mb,     color: '#00ff88' },
           ].map(({ label, val, color }) => (
             <div key={label} style={{ ...card(color), flex: 1, minWidth: 120 }}>
@@ -603,10 +632,10 @@ export default function Network() {
           </button>
           <button style={tabBtn(tab === 'alerts', '#ff003c')} onClick={() => setTab('alerts')}>
             🚨 ALERTS ({allAlerts.length})
-            {liveAlerts.length > 0 && (
+            {liveAlerts.filter(a => a.is_verified === true && a.verification === 'trained_network_ids').length > 0 && (
               <span style={{ marginLeft: 6, background: '#ff003c', color: '#fff',
                 borderRadius: 10, padding: '1px 6px', fontSize: 10 }}>
-                {liveAlerts.length} NEW
+                {liveAlerts.filter(a => a.is_verified === true && a.verification === 'trained_network_ids').length} NEW
               </span>
             )}
           </button>

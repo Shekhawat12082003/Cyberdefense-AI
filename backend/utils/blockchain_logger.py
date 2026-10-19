@@ -32,7 +32,7 @@ class BlockchainLogger:
 
     def _init_web3(self):
         if not WEB3_AVAILABLE:
-            print("ℹ️  Web3 not installed — using local simulation")
+            print("[INFO] Web3 not installed - using local simulation")
             return
 
         rpc_url          = os.getenv('ETH_RPC_URL', CORE_RPC)
@@ -40,17 +40,21 @@ class BlockchainLogger:
         private_key      = os.getenv('WALLET_PRIVATE_KEY', '')
 
         if not contract_address or not private_key:
-            print("ℹ️  No contract/key configured — using local simulation")
+            print("[INFO] No contract/key configured - using local simulation")
             return
 
         try:
-            self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+            self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
 
-            if not self.w3.is_connected():
-                print("⚠️  Cannot connect to Core Testnet2 — using local simulation")
+            try:
+                if not self.w3.is_connected():
+                    print("[WARN] Cannot connect to Core Testnet2 - using local simulation")
+                    return
+            except Exception as conn_err:
+                print(f"[WARN] Blockchain connection timeout: {conn_err} - using local simulation")
                 return
 
-            print(f"✅ Connected to Core Testnet2")
+            print(f"[OK] Connected to Core Testnet2")
             print(f"   RPC      : {rpc_url}")
             print(f"   Chain ID : {self.w3.eth.chain_id}")
 
@@ -64,7 +68,7 @@ class BlockchainLogger:
             print(f"   Balance  : {balance_eth:.4f} tCORE")
 
             if balance == 0:
-                print("⚠️  Wallet has 0 tCORE — get tokens from faucet")
+                print("[WARN] Wallet has 0 tCORE - get tokens from faucet")
                 return
 
             abi_path = os.path.join(
@@ -73,7 +77,7 @@ class BlockchainLogger:
             )
 
             if not os.path.exists(abi_path):
-                print(f"⚠️  ABI not found at {abi_path} — using local simulation")
+                print(f"[WARN] ABI not found at {abi_path} - using local simulation")
                 return
 
             with open(abi_path) as f:
@@ -85,13 +89,13 @@ class BlockchainLogger:
             )
 
             total = self.contract.functions.getTotalThreats().call()
-            print(f"✅ Contract loaded!")
+            print(f"[OK] Contract loaded!")
             print(f"   Address  : {contract_address}")
             print(f"   Threats  : {total} on-chain")
             self.mode = 'core_testnet2'
 
         except Exception as e:
-            print(f"⚠️  Blockchain init error: {e}")
+            print(f"[WARN] Blockchain init error: {e}")
             print("   Using local simulation")
 
     def hash_alert(self, alert_data: dict) -> str:

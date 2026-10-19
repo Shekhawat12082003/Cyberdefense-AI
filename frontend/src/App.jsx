@@ -4,6 +4,8 @@ import axios from 'axios'
 import Login      from './pages/Login'
 import Dashboard  from './pages/Dashboard'
 import Threats    from './pages/Threats'
+import RansomwareHistory from './pages/RansomwareHistory'
+import RansomwareDashboard from './pages/RansomwareDashboard'
 import Analytics  from './pages/Analytics'
 import Blockchain from './pages/Blockchain'
 import Admin      from './pages/Admin'
@@ -51,16 +53,10 @@ function useTokenCheck() {
     })
     .catch((err) => {
       clearTimeout(timeout)
-      if (err?.response?.status === 401) {
-        // Token expired or invalid → force fresh login
-        localStorage.clear()
-        setStatus('invalid')
-      } else {
-        // Network error / CORS / backend down
-        // Trust local storage rather than locking user out
-        console.warn('Backend unreachable — trusting cached token')
-        setStatus('valid')
-      }
+      console.error('Token verification failed:', err)
+      // Always clear on any error to force fresh login
+      localStorage.clear()
+      setStatus('invalid')
     })
   }, [])
 
@@ -175,6 +171,12 @@ export default function App() {
         } />
         <Route path="/threats" element={
           <PrivateRoute><Threats /></PrivateRoute>
+        } />
+        <Route path="/ransomware" element={
+          <PrivateRoute><RansomwareDashboard /></PrivateRoute>
+        } />
+        <Route path="/ransomware-history" element={
+          <PrivateRoute><RansomwareHistory /></PrivateRoute>
         } />
         <Route path="/analytics" element={
           <PrivateRoute><Analytics /></PrivateRoute>

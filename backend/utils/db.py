@@ -126,10 +126,10 @@ def init_db():
             'INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)',
             DEFAULT_USERS
         )
-        print("✅ Default users seeded (admin, analyst)")
+        print("[OK] Default users seeded (admin, analyst)")
     conn.commit()
     conn.close()
-    print("✅ Database initialized: cyberdefense.db")
+    print("[OK] Database initialized: cyberdefense.db")
 
 
 # ── User CRUD ─────────────────────────────────────────────
@@ -478,14 +478,20 @@ def save_honeypot_trigger(entry: dict):
     conn.close()
 
 
-def get_honeypot_triggers(limit: int = 100) -> list:
+def get_honeypot_triggers(limit: int = 100, verified_only: bool = False) -> list:
     conn = sqlite3.connect(DB_PATH)
     c    = conn.cursor()
+    verified_filter = """
+        WHERE UPPER(TRIM(operation)) IN ('OPEN', 'OPENED', 'READ', 'ACCESSED', 'DELETE', 'DELETED')
+          AND TRIM(COALESCE(process_name, '')) != ''
+          AND LOWER(TRIM(process_name)) != 'unknown'
+          AND (scenario_id IS NULL OR TRIM(scenario_id) = '')
+    """ if verified_only else ''
     c.execute('''
         SELECT event_id, timestamp, resource, operation, process_name,
                process_pid, source_ip, scenario_id
-        FROM honeypot_triggers ORDER BY id DESC LIMIT ?
-    ''', (limit,))
+        FROM honeypot_triggers
+    ''' + verified_filter + ' ORDER BY id DESC LIMIT ?', (limit,))
     rows = c.fetchall()
     conn.close()
     return [
@@ -493,6 +499,23 @@ def get_honeypot_triggers(limit: int = 100) -> list:
          'process_name': r[4], 'process_pid': r[5], 'source_ip': r[6], 'scenario_id': r[7]}
         for r in rows
     ]
+
+
+def count_verified_honeypot_triggers_since(timestamp: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT COUNT(*)
+        FROM honeypot_triggers
+        WHERE timestamp >= ?
+          AND UPPER(TRIM(operation)) IN ('OPEN', 'OPENED', 'READ', 'ACCESSED', 'DELETE', 'DELETED')
+          AND TRIM(COALESCE(process_name, '')) != ''
+          AND LOWER(TRIM(process_name)) != 'unknown'
+          AND (scenario_id IS NULL OR TRIM(scenario_id) = '')
+    ''', (timestamp,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
 
 # ── Simulation Log ────────────────────────────────────────

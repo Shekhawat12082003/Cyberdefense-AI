@@ -126,6 +126,7 @@ export default function SOC() {
   const [incidents,   setIncidents]   = useState([])
   const [secEvents,   setSecEvents]   = useState([])   // unified security events
   const [lastAttacker, setLastAttacker] = useState(null)
+  const [sysHealth,   setSysHealth]   = useState(null) // real component health
   const navigate = useNavigate()
   const socketRef = useRef(null)
 
@@ -136,7 +137,7 @@ export default function SOC() {
 
   // ── WebSocket ──────────────────────────────────────────
   useEffect(() => {
-    const socket = io('http://localhost:5000', { transports: ['websocket'] })
+    const socket = io('http://localhost:5000', { transports: ['polling'] })
     socketRef.current = socket
 
     socket.on('high_threat_alert', (data) => {
@@ -187,16 +188,19 @@ export default function SOC() {
     try {
       const token = localStorage.getItem('token')
       const headers = token ? { Authorization: `Bearer ${token}` } : {}
-      const [s, t, a, hp, lab, inc] = await Promise.all([
+      const [s, t, a, hp, lab, inc, health] = await Promise.all([
         getStats(),
         getThreats(),
         axios.get('http://localhost:5000/api/audit-log?limit=500', { headers }),
         getHoneypotStatus().catch(() => ({ data: {} })),
         getLabStatus().catch(() => ({ data: {} })),
         getIncidents({ limit: 20 }).catch(() => ({ data: { incidents: [] } })),
+        axios.get('http://localhost:5000/api/system/health', { headers }).catch(() => ({ data: null })),
       ])
       setStats(s.data)
-      const list = t.data.slice(0, 20)
+      // threats API returns array directly, not wrapped in { threats: [] }
+      const threatArray = Array.isArray(t.data) ? t.data : (t.data.threats || [])
+      const list = threatArray.slice(0, 20)
       setThreats(list)
       if (list.length > 0) setLastScore(Math.min(list[0].threat_score ?? 0, 100))
       const entries = (a.data || []).filter(e => e.action).map(toFeedEntry)
@@ -204,7 +208,16 @@ export default function SOC() {
       setHpStatus(hp.data)
       setLabStatus(lab.data)
       setIncidents(inc.data.incidents || [])
-    } catch {}
+      if (health.data) setSysHealth(health.data.components || null)
+    } catch (e) {
+      console.error('SOC data fetch error:', e)
+      console.error('Error message:', e?.message)
+      // If unauthorized, clear storage and redirect to login
+      if (e?.response?.status === 401) {
+        localStorage.clear()
+        navigate('/login', { replace: true })
+      }
+    }
   }
 
   useEffect(() => {
@@ -240,13 +253,51 @@ export default function SOC() {
   const hpTriggers = hpStatus?.trigger_count || 0
   const labRunning = labStatus?.active_scenario
 
+  // blockchain mode for services label — must come before services array
+  const bc_mode = labStatus?.blockchain_mode || 'local'
+
   const services = [
-    { name: 'ML Engine',    ok: true },
-    { name: 'Blockchain',   ok: true, val: (labStatus?.blockchain_mode || 'local').toUpperCase() },
-    { name: 'File Monitor', ok: true },
-    { name: 'Honeypot',     ok: labStatus?.honeypot_active !== false, val: `${labStatus?.honeypot_active !== false ? 'ACTIVE' : 'OFFLINE'} (${hpTriggers} hits)` },
-    { name: 'Cyber Lab',    ok: true, val: labRunning ? '🔴 SIM RUNNING' : '🟢 READY' },
-    { name: 'WebSocket',    ok: !!socketRef.current?.connected },
+    {
+      name: 'ML Engine',
+      ok:   sysHealth ? sysHealth.ml_model?.ok : true,
+      val:  sysHealth ? (sysHealth.ml_model?.ok ? 'LOADED' : 'NOT LOADED') : '...',
+    },
+    {
+      name: 'Blockchain',
+      ok:   true,
+      val:  (labStatus?.blockchain_mode || bc_mode || 'local').toUpperCase(),
+    },
+    {
+      name: 'File Monitor',
+      ok:   sysHealth ? sysHealth.file_monitor?.ok : true,
+      val:  sysHealth ? (sysHealth.file_monitor?.ok ? 'WATCHING' : 'OFFLINE') : '...',
+    },
+    {
+      name: 'Honeypot',
+      ok:   sysHealth ? sysHealth.honeypot?.ok : (labStatus?.honeypot_active !== false),
+      val:  sysHealth
+        ? sysHealth.honeypot?.detail
+        : `${labStatus?.honeypot_active !== false ? 'ACTIVE' : 'OFFLINE'} (${hpTriggers} hits)`,
+    },
+    {
+      name: 'Net Monitor',
+      ok:   sysHealth ? sysHealth.network_monitor?.ok : true,
+      val:  sysHealth ? (sysHealth.network_monitor?.detail || 'UNKNOWN').toUpperCase() : '...',
+    },
+    {
+      name: 'Cyber Lab',
+      ok:   true,
+      val:  labRunning ? '🔴 SIM RUNNING' : '🟢 READY',
+    },
+    {
+      name: 'WebSocket',
+      ok:   !!socketRef.current?.connected,
+    },
+    {
+      name: 'Database',
+      ok:   sysHealth ? sysHealth.database?.ok : true,
+      val:  sysHealth ? (sysHealth.database?.ok ? 'CONNECTED' : 'ERROR') : '...',
+    },
   ]
 
   // Attacker info from latest event

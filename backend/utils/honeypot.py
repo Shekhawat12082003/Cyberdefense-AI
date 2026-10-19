@@ -62,6 +62,17 @@ _trigger_callbacks: list = []
 _watcher_active = False
 
 
+def _is_verified_trigger(entry: dict) -> bool:
+    operation = str(entry.get('operation', '')).strip().upper()
+    process_name = str(entry.get('process_name', '')).strip()
+    return (
+        not entry.get('scenario_id')
+        and operation in {'OPEN', 'OPENED', 'READ', 'ACCESSED', 'DELETE', 'DELETED'}
+        and process_name
+        and process_name.lower() != 'unknown'
+    )
+
+
 def setup_honeypot() -> bool:
     """Create honeypot directory and all decoy files. Idempotent."""
     try:
@@ -71,10 +82,10 @@ def setup_honeypot() -> bool:
             if not os.path.exists(path):
                 with open(path, 'wb') as f:
                     f.write(content)
-        print(f"🍯 Honeypot initialized: {HONEYPOT_DIR} ({len(HONEYPOT_FILES)} decoy files)")
+        print(f"[HONEYPOT] Honeypot initialized: {HONEYPOT_DIR} ({len(HONEYPOT_FILES)} decoy files)")
         return True
     except Exception as e:
-        print(f"⚠️  Honeypot setup failed: {e}")
+        print(f"[WARN] Honeypot setup failed: {e}")
         return False
 
 
@@ -98,25 +109,25 @@ def start_honeypot_watcher() -> bool:
                     return
                 fname = os.path.basename(event.src_path)
                 if fname in HONEYPOT_FILES:
+                    if operation not in {'OPEN', 'READ', 'DELETE'}:
+                        return
                     # Get process that accessed the file (best effort)
                     proc_name, proc_pid = _get_accessor_process(event.src_path)
-                    record_trigger(
-                        resource=fname,
-                        process_name=proc_name,
-                        process_pid=proc_pid,
-                        source_ip=None,   # filesystem access — no IP
-                        operation=operation,
-                    )
+                    entry = {
+                        'resource': fname,
+                        'process_name': proc_name,
+                        'process_pid': proc_pid,
+                        'source_ip': None,
+                        'operation': operation,
+                    }
+                    if _is_verified_trigger(entry):
+                        record_trigger(**entry)
 
             def on_opened(self, event):   self._handle(event, 'OPEN')
             def on_accessed(self, event): self._handle(event, 'READ')
             def on_modified(self, event): self._handle(event, 'WRITE')
             def on_created(self, event):  self._handle(event, 'CREATE')
             def on_deleted(self, event):  self._handle(event, 'DELETE')
-            # Fallback for watchdog versions that don't have on_opened
-            def on_any_event(self, event):
-                if hasattr(event, 'event_type') and event.event_type in ('opened', 'accessed'):
-                    self._handle(event, event.event_type.upper())
 
         observer = Observer()
         handler  = HoneypotHandler()
@@ -124,12 +135,12 @@ def start_honeypot_watcher() -> bool:
         observer.start()
 
         _watcher_active = True
-        print(f"🍯 Honeypot watcher ACTIVE — monitoring {HONEYPOT_DIR}")
+        print(f"[HONEYPOT] Honeypot watcher ACTIVE - monitoring {HONEYPOT_DIR}")
         print(f"   Any access to decoy files will trigger an alert")
         return True
 
     except Exception as e:
-        print(f"⚠️  Honeypot watcher failed to start: {e}")
+        print(f"[WARN] Honeypot watcher failed to start: {e}")
         print(f"   Decoy files exist but filesystem access won't auto-detect")
         return False
 
@@ -170,10 +181,10 @@ def setup_honeypot() -> bool:
             if not os.path.exists(path):
                 with open(path, 'wb') as f:
                     f.write(content)
-        print(f"🍯 Honeypot initialized: {HONEYPOT_DIR} ({len(HONEYPOT_FILES)} decoy files)")
+        print(f"[HONEYPOT] Honeypot initialized: {HONEYPOT_DIR} ({len(HONEYPOT_FILES)} decoy files)")
         return True
     except Exception as e:
-        print(f"⚠️  Honeypot setup failed: {e}")
+        print(f"[WARN] Honeypot setup failed: {e}")
         return False
 
 
@@ -235,7 +246,7 @@ def record_trigger(
         except Exception:
             pass
 
-    print(f"🍯 HONEYPOT TRIGGERED: {resource} by {process_name or 'Unknown'} (PID {process_pid})")
+    print(f"[HONEYPOT TRIGGERED] {resource} by {process_name or 'Unknown'} (PID {process_pid})")
     return entry
 
 
@@ -246,12 +257,13 @@ def register_callback(fn):
 
 def get_recent_triggers(limit: int = 50) -> list:
     with _lock:
-        return list(reversed(_access_log[-limit:]))
+        verified = [entry for entry in _access_log if _is_verified_trigger(entry)]
+        return list(reversed(verified[-limit:]))
 
 
 def get_trigger_count() -> int:
     with _lock:
-        return len(_access_log)
+        return sum(1 for entry in _access_log if _is_verified_trigger(entry))
 
 
 def _save_log(entry: dict):

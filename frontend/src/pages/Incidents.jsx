@@ -32,7 +32,7 @@ export default function Incidents() {
 
   // Live updates
   useEffect(() => {
-    const socket = io('http://localhost:5000', { transports: ['websocket'] })
+    const socket = io('http://localhost:5000', { transports: ['polling'] })
     socket.on('incident_created', () => fetchIncidents())
     socket.on('incident_updated', () => fetchIncidents())
     return () => socket.disconnect()

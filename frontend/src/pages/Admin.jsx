@@ -29,6 +29,14 @@ export default function Admin() {
     setTimeout(() => setMsg(null), 3000)
   }
 
+  // Fetch current threshold from backend on mount
+  useEffect(() => {
+    fetch('http://localhost:5000/api/admin/settings', { headers })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.threat_threshold !== undefined) setThreshold(d.threat_threshold) })
+      .catch(() => {})
+  }, [])
+
   const loadAll = async () => {
     try {
       const [u, q, s, st] = await Promise.all([
@@ -170,8 +178,8 @@ export default function Admin() {
         <div className="grid grid-cols-5 gap-3 mb-6">
           {[
             { label: 'USERS',       value: sysInfo.users_count,      color: 'text-cyan-400'   },
-            { label: 'TOTAL SCANS', value: stats?.total || 0,        color: 'text-white'       },
-            { label: 'RANSOMWARE',  value: stats?.ransomware || 0,   color: 'text-red-500'    },
+            { label: 'TOTAL SCANS', value: stats?.total_scanned || 0,   color: 'text-white'    },
+            { label: 'THREATS',     value: stats?.active_threats || 0, color: 'text-red-500'  },
             { label: 'QUARANTINED', value: sysInfo.quarantine_files, color: 'text-yellow-400' },
             { label: 'BLOCKCHAIN',  value: sysInfo.blockchain_logs,  color: 'text-green-400'  },
           ].map((s, i) => (

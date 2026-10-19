@@ -177,24 +177,12 @@ export default function LiveIncidentCard({ incident, onDismiss }) {
     return () => clearInterval(id)
   }, [detectionTime])
 
-  // Auto-progress status steps for simulation realism
+  // Sync status from incident prop — never auto-progress with timers
+  // Only mark steps done when the backend actually reports them
   useEffect(() => {
     if (!incident) return
-    const timers = []
-
-    // Honeypot check (0.8s)
-    timers.push(setTimeout(() => setStatus(s => ({ ...s, honeypot: incident?.honeypot?.triggered || false })), 800))
-    // ML (1.5s)
-    timers.push(setTimeout(() => setStatus(s => ({ ...s, ml: true })), 1500))
-    // Quarantine (2.5s)
-    timers.push(setTimeout(() => setStatus(s => ({ ...s, quarantine: true })), 2500))
-    // Evidence (3.5s)
-    timers.push(setTimeout(() => setStatus(s => ({ ...s, evidence: true })), 3500))
-    // Blockchain (5s)
-    timers.push(setTimeout(() => setStatus(s => ({ ...s, blockchain: true })), 5000))
-
-    return () => timers.forEach(clearTimeout)
-  }, [incident?.incident_id])
+    setStatus(incident.status || {})
+  }, [incident?.incident_id, incident?.status])
 
   if (!incident) return null
 

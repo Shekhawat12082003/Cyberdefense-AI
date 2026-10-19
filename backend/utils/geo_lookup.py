@@ -9,7 +9,7 @@ Private/local IPs are identified without any lookup attempt.
 import os
 import ipaddress
 import requests
-from functools import lru_cache
+import threading
 
 IPINFO_TOKEN = os.getenv('IPINFO_TOKEN', '').strip()
 
@@ -24,6 +24,8 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network('fc00::/7'),
     ipaddress.ip_network('fe80::/10'),
 ]
+_LOOKUP_CACHE = {}
+_LOOKUP_CACHE_LOCK = threading.Lock()
 
 
 def is_private_ip(ip: str) -> bool:
@@ -31,21 +33,40 @@ def is_private_ip(ip: str) -> bool:
     if not ip or ip in ('local', 'unknown', '', 'N/A'):
         return True
     try:
-        addr = ipaddress.ip_address(ip)
+        addr = ipaddress.ip_address(str(ip).split('%', 1)[0])
         return any(addr in net for net in _PRIVATE_NETWORKS)
     except ValueError:
         return True
 
 
-@lru_cache(maxsize=256)
-def _cached_lookup(ip: str) -> dict:
-    """Cached lookup — avoids repeated calls for same IP within process lifetime."""
+def _lookup(ip: str) -> dict:
+    """Try geolocation providers in order, returning the first valid result."""
     # Try ipinfo.io first (HTTPS, more accurate, free 50k/month)
     result = _lookup_ipinfo(ip)
     if result:
         return result
-    # Fallback to ip-api.com
-    return _lookup_ipapi(ip)
+    # ip-api is a useful no-key fallback, but some networks block its HTTP endpoint.
+    result = _lookup_ipapi(ip)
+    if result:
+        return result
+    # HTTPS no-key fallback for networks that block plain HTTP.
+    return _lookup_ipwho(ip)
+
+
+def _cached_lookup(ip: str) -> dict:
+    """Cache successful lookups only, so transient failures can be retried."""
+    with _LOOKUP_CACHE_LOCK:
+        cached = _LOOKUP_CACHE.get(ip)
+    if cached:
+        return dict(cached)
+
+    result = _lookup(ip)
+    if result:
+        with _LOOKUP_CACHE_LOCK:
+            if len(_LOOKUP_CACHE) >= 256:
+                _LOOKUP_CACHE.pop(next(iter(_LOOKUP_CACHE)))
+            _LOOKUP_CACHE[ip] = dict(result)
+    return result
 
 
 def _lookup_ipinfo(ip: str) -> dict:
@@ -111,7 +132,42 @@ def _lookup_ipapi(ip: str) -> dict:
             'approximate': True,
             'source':      'ip-api.com',
         }
-    except Exception:
+    except requests.RequestException:
+        return None
+    except (ValueError, TypeError):
+        return None
+
+
+def _lookup_ipwho(ip: str) -> dict:
+    """HTTPS, no-key fallback for environments that block plain HTTP."""
+    try:
+        response = requests.get(f'https://ipwho.is/{ip}', timeout=5)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if not data.get('success'):
+            return None
+        connection = data.get('connection') or {}
+        timezone = data.get('timezone') or {}
+        asn = connection.get('asn')
+        return {
+            'ip': data.get('ip', ip),
+            'country': data.get('country', 'Unknown'),
+            'region': data.get('region', 'Unknown'),
+            'city': data.get('city', 'Unknown'),
+            'lat': data.get('latitude'),
+            'lon': data.get('longitude'),
+            'isp': connection.get('isp', 'Unknown'),
+            'asn': f"AS{asn}" if asn else 'Unknown',
+            'org': connection.get('org', 'Unknown'),
+            'timezone': timezone.get('id', 'Unknown'),
+            'hostname': '',
+            'approximate': True,
+            'source': 'ipwho.is',
+        }
+    except requests.RequestException:
+        return None
+    except (ValueError, TypeError):
         return None
 
 
@@ -140,6 +196,7 @@ def geolocate(ip: str) -> dict:
         'ip':    ip,
         'type':  'unknown',
         'label': 'Location: Unknown',
+        'note':  'Geolocation providers did not return data. Check backend internet access and retry.',
     }
 
 
@@ -181,5 +238,5 @@ def format_geo_display(geo: dict) -> dict:
     return {
         'type':    'unknown',
         'display': 'Unknown',
-        'note':    'Geolocation unavailable',
+        'note':    geo.get('note', 'Geolocation unavailable'),
     }

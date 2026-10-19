@@ -1,344 +1,445 @@
-<div align="center">
+# CyberDefense-AI
 
-# 🛡️ CyberDefense-AI
+CyberDefense-AI is a local-first, full-stack security monitoring and analysis platform. It combines a React dashboard with a Python API, SQLite storage, trained file and network classifiers, host-visible network capture, honeypot decoys, incident records, and optional threat-intelligence and blockchain integrations.
 
-### AI-Powered Security Operations Center Platform
+It has two distinct workspaces:
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python)](https://python.org)
-[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react)](https://react.dev)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.1-EE4C2C?style=flat-square&logo=pytorch)](https://pytorch.org)
-[![Blockchain](https://img.shields.io/badge/Blockchain-Core_Testnet2-gold?style=flat-square)](https://coredao.org)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+- **SOC workspace** — network activity, threats, incidents, analytics, investigations, and administration.
+- **Ransomware workspace** — the earlier ransomware/file-scanning dashboard and its scan history.
 
-**Real-time network attack detection · ML threat classification · Live incident response · Cyber Range**
+The application is a defensive learning and monitoring project, not an endpoint protection product or a substitute for a production SOC. Detection is limited to data the host can actually observe and the installed models can process. A model prediction is evidence for analyst review, not proof that an attack occurred.
 
-[Live Demo](#demo-credentials) · [Quick Start](#quick-start) · [Architecture](#architecture)
+## Contents
 
-</div>
+1. [What the application does](#what-the-application-does)
+2. [Workspaces and pages](#workspaces-and-pages)
+3. [How data moves through the system](#how-data-moves-through-the-system)
+4. [Live network capture and model verification](#live-network-capture-and-model-verification)
+5. [File and ransomware scanning](#file-and-ransomware-scanning)
+6. [Events, incidents, and risk scores](#events-incidents-and-risk-scores)
+7. [Cyber Lab simulations](#cyber-lab-simulations)
+8. [Honeypot, evidence, and integrations](#honeypot-evidence-and-integrations)
+9. [Requirements and setup](#requirements-and-setup)
+10. [Configuration](#configuration)
+11. [Running and using the application](#running-and-using-the-application)
+12. [API and real-time events](#api-and-real-time-events)
+13. [Data, privacy, and security](#data-privacy-and-security)
+14. [Troubleshooting](#troubleshooting)
+15. [Tests and development](#tests-and-development)
+16. [Repository map](#repository-map)
+17. [Known limitations](#known-limitations)
 
----
+## What the application does
 
-## Overview
+| Capability | Input | Output |
+| --- | --- | --- |
+| File threat scan | Uploaded PE file or extracted PE features | Benign, suspicious, or ransomware classification, score, feature summary, and persisted scan record |
+| Live network analysis | Packets visible to the selected host adapter | Parsed packet/flow rows and, when the trained classifier can verify a flow, a model-verified network alert |
+| OS connection monitoring | Connections visible to the local operating system | Host connection and network-activity context; this is not packet capture |
+| Security events and incidents | File, honeypot, network, and simulation telemetry | Stored records and analyst-facing incident views |
+| Cyber Lab | An explicitly enabled scenario | Clearly labeled synthetic events for exercising the Lab/SOC display |
+| Enrichment and response support | An IP, file hash, or incident | Optional external lookups, investigation context, evidence bundle, and integrity checks |
 
-CyberDefense-AI is a full-stack Security Operations Center that detects, classifies, and responds to cyber attacks in real time. It monitors your network traffic, identifies attack patterns using machine learning, enriches threat data with external intelligence, and presents everything through a live SOC dashboard.
+The app keeps several concepts separate:
 
-The project evolved from a simple ransomware file scanner into a complete defensive security platform — from PE file analysis to live network packet capture, honeypot traps, multi-signal incident correlation, and automated forensic evidence preservation with blockchain integrity verification.
+- **Packets** are observations emitted by packet capture.
+- **Flows** summarize packets by network endpoints and protocol for model input.
+- **Verified network alerts** require a valid trained network-model result. A rule candidate alone is not a confirmed attack.
+- **File predictions** come from the ransomware/file classifier and are separate from the network classifier.
+- **Simulation events** are manufactured test telemetry. They do not become captured packets or verified live network attacks.
 
----
+## Workspaces and pages
 
-## Core Capabilities
+The workspace switcher lets an analyst move between the SOC dashboard and the ransomware center.
 
-### 🔴 Real-Time Attack Detection
+### SOC workspace
 
-The platform monitors ALL network traffic arriving at your machine and detects attacks from other devices on the same network:
+- **SOC Dashboard (`/`)** — high-level security activity, alerts, health, and links to investigations.
+- **SOC War Room (`/soc`)** — operational event and incident view.
+- **Network (`/network`)** — packet capture status, network flows, and verified network alerts.
+- **Threats (`/threats`)** — file scan history and threat results.
+- **Analytics (`/analytics`)** — summaries and charts based on stored data.
+- **Incidents (`/incidents`)** — incident list and scenario context.
+- **Incident detail (`/incidents/:id`)** — incident overview, attacker context, investigation, timeline, attack graph, evidence, and replay views.
+- **Cyber Lab (`/lab`)** — controlled synthetic scenarios, mode control, logs, honeypot activity, and stop/reset controls.
+- **Blockchain (`/blockchain`)** — blockchain status, recorded entries, and verification tools when the integration is configured.
+- **Audit Log (`/audit`)** — recorded user and system actions.
+- **Chat (`/chat`)** — AI-assisted analyst chat when a supported provider key is configured.
+- **Admin (`/admin`)** — user and system administration; restricted to the admin role.
 
-- **nmap port scans** — detected within 30 seconds (5 distinct ports threshold)
-- **Brute force attacks** — SSH, RDP, FTP, SMB, Telnet (8 attempts in 60s)
-- **SYN floods** — DoS attempt detection (50 SYNs/30s)
-- **Stealth scans** — NULL scan, XMAS scan, FIN scan
-- **C2 beaconing** — periodic callbacks to external IPs
-- **Data exfiltration** — large outbound data bursts (20MB threshold)
+### Ransomware workspace
 
-When an attack is detected, the SOC dashboard shows a live incident card within seconds — attacker IP, geolocation, risk score, honeypot status, and response actions.
+- **Ransomware Center (`/ransomware`)** — the dedicated ransomware/file-analysis dashboard.
+- **Ransomware History (`/ransomware-history`)** — stored ransomware-related scan records.
 
-### 🦠 Malware & Ransomware Classification
+The SOC and ransomware pages share the application's backend and scan database. The workspace switcher separates the interfaces; it does not create separate application installations or databases.
 
-Dual ML ensemble trained on 62,485 PE files:
+## How data moves through the system
 
-| Model | Accuracy | Architecture |
-|-------|----------|-------------|
-| Random Forest | **99.62%** | 100 trees, 15 PE features |
-| PyTorch DNN | **98.30%** | 4-layer: 128→64→32→1, BatchNorm |
-
-Features: `Machine`, `DebugSize`, `DebugRVA`, `MajorImageVersion`, `MajorOSVersion`, `ExportRVA`, `ExportSize`, `IatVRA`, `MajorLinkerVersion`, `MinorLinkerVersion`, `NumberOfSections`, `SizeOfStackReserve`, `DllCharacteristics`, `ResourceSize`, `BitcoinAddresses`
-
-Every prediction includes SHAP explainability — which features drove the classification and by how much.
-
-### 🌐 Network Intrusion Detection (ML)
-
-Separate ensemble trained on CICIDS2017 + CICIDS2018 + NSL-KDD:
-
-| Model | Accuracy | Classes |
-|-------|----------|---------|
-| Network RF | **93-94%** | 8-class attack classification |
-| Network DNN | **85-86%** | LayerNorm — stable training, no oscillation |
-| Binary RF Anomaly | **93.3% / 95.9% F1** | Attack vs Benign detection |
-| NSL-KDD DNN | **97.38%** | DoS, Port Scan, Brute Force, Infiltration |
-
-Attack classes: `BENIGN · PORT_SCAN · BRUTE_FORCE · DOS · DDOS · BOTNET · WEB_ATTACK · INFILTRATION`
-
-### 🍯 Active Honeypot
-
-7 decoy files that look like real sensitive data but contain completely fake content. A Watchdog filesystem monitor watches the honeypot directory — any process that opens, reads, or modifies a decoy file triggers an immediate alert.
-
-Decoy files: `financial_report_Q4.xlsx` · `employee_data.xlsx` · `passwords.txt` · `backup.zip` · `credentials.db` · `ssh_private_key.pem` · `database_backup.sql`
-
-### 🔍 Threat Intelligence
-
-Every detected attacker IP is automatically enriched:
-
-- **AbuseIPDB** — abuse confidence score, total reports, Tor exit node check
-- **Shodan** — open ports, running services, CVEs on attacker's machine
-- **VirusTotal** — file hash against 70+ AV engines, malware family
-
-### ⛓ Blockchain Integrity
-
-Every HIGH-severity threat and forensic evidence bundle is recorded on **Core Testnet2** (Chain ID 1114). Analysts can verify any incident hash through the Blockchain page — proof that evidence hasn't been tampered with.
-
----
-
-## Architecture
-
-```
-Attack from network               File dropped in watched/
-        │                                  │
-        ▼                                  ▼
-Network Monitor                     File Monitor
-(raw socket / scapy)              (Watchdog observer)
-        │                                  │
-        ▼                                  ▼
-Detection Engines               Extract PE Features
-(PORT_SCAN, BRUTE_FORCE,        (pefile / entropy)
- SYN_FLOOD, NULL/XMAS/FIN)             │
-        │                               ▼
-        ▼                    RF + DNN Ensemble
-IP Geolocation                 (threat_scorer.py)
-(ipinfo.io → ip-api.com)              │
-        │                              ▼
-        ▼                    MITRE ATT&CK Mapping
-Threat Intel                           │
-(AbuseIPDB, Shodan)                    ▼
-        │                    Auto-Quarantine + Blockchain
+```text
+Wireshark TShark + Npcap
+        │ observed packets
         ▼
-Risk Scorer ←── Honeypot Trigger ──── Threat Correlator
-(0-100 score)                         (multi-signal)
+Flow extractor ──► Trained network IDS ──► verified live flow / alert
+        │                                      │
+        └────────► packet and flow views        ├──► in-memory live metrics
+                                               └──► real-time dashboard events
+
+Uploaded PE or watched-file activity
         │
         ▼
-Incident Manager ──→ WebSocket ──→ SOC Dashboard
-        │             (live_incident)
-        ▼
-Forensic Evidence
-+ Blockchain Hash
+PE feature extraction ──► file threat scorer ──► scan record / threat event
+
+Real security telemetry ──────────────┐
+Synthetic Cyber Lab events ───────────┼──► security-event / incident handling
+Honeypot activity ────────────────────┘       │
+                                               ├──► SQLite history
+                                               ├──► WebSocket UI updates
+                                               └──► optional enrichment/evidence integrations
 ```
 
----
+The live packet path and simulation path are intentionally independent. A simulation can create an incident or event visible in the application while no corresponding network packet exists. For classifying traffic generated by a test tool as a **real network flow**, run the test over the captured adapter and let the live capture/model pipeline observe it; the scenario endpoint itself does not inject traffic.
 
-## ML Models
+The Flask application serves the JSON API on port `5000` and uses Flask-SocketIO for real-time updates. The React/Vite frontend calls the API and subscribes to socket events. Most dashboard data is loaded through authenticated API requests; live events are pushed to connected clients as they occur.
 
-### Ransomware Detection
-Trained on 62,485 PE files (ransomware + benign samples).
+## Live network capture and model verification
 
-```python
-# Ensemble prediction
-rf_prob  = rf_model.predict_proba(features)[0][1]   # 60% weight
-dnn_prob = pytorch_dnn(features_tensor).item()       # 40% weight
-score    = (rf_prob * 0.60 + dnn_prob * 0.40) * 100
-```
+### Capture path
 
-### Network IDS
-Trained on CICIDS2017 (2.8M flows) + CICIDS2018 (6.6M flows).
+1. The backend discovers TShark interfaces and attempts to start capture automatically on the interface matching a local IP.
+2. TShark (Wireshark's command-line capture tool) uses Npcap on Windows to read traffic visible to that adapter.
+3. Parsed IPv4/IPv6 packet fields are passed to the flow extractor.
+4. The extractor groups packets into bidirectional flows and produces the features named by the saved network-model metadata.
+5. The trained network IDS classifies each completed flow.
+6. The app records flows and only creates a **confirmed live network attack** when the trained model is available, inference succeeds, required features are valid, the predicted class is non-benign, and confidence is at least 70%.
+7. Repeated alerts for the same flow/class are throttled; the dashboard receives updates through the API and WebSocket.
 
-Key fixes in the training pipeline:
-- **LayerNorm** replaces BatchNorm in DNN — eliminates train/eval accuracy oscillation
-- **Disk checkpointing** (`torch.save`) — best model saved to disk, isolated from RAM tensor state
-- **Binary RF Anomaly Detector** replaces Isolation Forest — 93.3% vs 43% accuracy
-- **Stratified sampling before merge** — avoids OOM with 9M+ row datasets
+When the model is missing, required features are absent or invalid, or inference fails, the result is unverified. It must not be treated as a confirmed attack. A normal prediction is not an attack. A rule-based scan/connection heuristic may be useful context, but does not replace the trained-model gate.
 
-### Risk Score (0–100)
+### What Wi-Fi capture can and cannot see
 
-Transparent, factor-based scoring — not hard-coded:
+- Capture is from the host's selected network interface. On ordinary Wi-Fi client mode this generally means traffic visible to this computer, not every device communicating through the access point.
+- Promiscuous mode does not by itself provide 802.11 monitor-mode visibility or decrypt other clients' Wi-Fi traffic.
+- Encrypted application payloads usually remain encrypted; the app can still display packet metadata such as endpoints, ports, protocol, length, and timing.
+- IPv6 endpoints are supported when the capture tool supplies the required fields. Ports are displayed alongside IP addresses where available.
+- Seeing an endpoint IP does not automatically provide a reliable owner, city, ISP, or organization. Private, reserved, local, and unsupported addresses may have no useful public geolocation.
 
-| Signal | Max Contribution |
-|--------|-----------------|
-| ML Detection | 25 pts |
-| Honeypot Trigger | 25 pts |
-| Network Attack | 25 pts |
-| File Activity | 15 pts |
-| Process Anomaly | 5 pts |
-| Multi-signal Correlation | 5 pts |
+### Packet capture prerequisites
 
----
+- Install Wireshark with TShark and Npcap. Confirm `tshark -D` lists the adapter you intend to use.
+- On Windows, run the backend with the privileges required by Npcap/capture configuration. The repository includes `backend/start_admin.bat` to request an elevated prompt.
+- Select the correct adapter in the Network page if automatic selection does not start capture.
+- Check `/api/capture/status` or the Network page for capture state, packet count, and selected interface.
+- OS connection monitoring can provide a fallback view when packet capture is unavailable. It does **not** produce packet rows or trained-model flow confirmations.
 
-## Cyber Range
+## File and ransomware scanning
 
-A safe, controlled attack simulation environment. All simulations flow through the **same detection pipeline** as real attacks — not scripted fake sequences.
+The file scanner uses features extracted from Windows PE files. The feature schema currently includes fields such as machine type, image/linker versions, sections, imports/exports, resources, stack reserve, DLL characteristics, and a Bitcoin-address indicator. Files that are not valid or parseable PE inputs may fail feature extraction.
 
-```bash
-# Interactive terminal
-python cyberdefense_cli.py
+The backend combines the available file-classification models and returns:
 
-# Direct commands
-python cyberdefense_cli.py simulate ransomware
-python cyberdefense_cli.py simulate portscan
-python cyberdefense_cli.py simulate brute-force
-python cyberdefense_cli.py simulate phishing
-python cyberdefense_cli.py simulate suspicious-process
-python cyberdefense_cli.py simulate data-exfiltration
-python cyberdefense_cli.py simulate honeypot
-python cyberdefense_cli.py simulate full-attack      # 7-stage complete attack
-python cyberdefense_cli.py status
-python cyberdefense_cli.py incidents
-```
+- `prediction`: `Benign`, `Suspicious`, or `Ransomware`;
+- `threat_score` and `risk_level`;
+- model confidence fields when available;
+- a short feature-based explanation and hash;
+- MITRE ATT&CK mappings where applicable.
 
-**Full attack simulation stages:**
-1. Reconnaissance (port scan)
-2. Authentication brute force
-3. Suspicious process spawned
-4. Honeypot access
-5. Malicious file deployment (ML detection)
-6. Data exfiltration
-7. Ransom note dropped
+The file classifier is not the same model as the live network IDS. Upload scans are persisted in SQLite and may produce SOC feed events. Optional notifications and AI summaries depend on configuration and service availability. Scores are model outputs and should be reviewed with the source file and context; they are not a guarantee of malware or safety.
 
----
+## Events, incidents, and risk scores
 
-## SOC Dashboard
+The backend stores file scan history, unified security events, honeypot triggers, simulation logs, audit events, network audit entries, and incident records in SQLite. Some live packet/flow counters are held in memory and can reset when the backend restarts.
 
-The live SOC dashboard updates in real time via WebSocket:
+An incident is an analyst-oriented record that can aggregate source/destination context, severity, risk factors, timeline entries, files, honeypot activity, model fields, and optional enrichment/evidence. The existence of an incident does not mean every field was observed directly: simulation events are labeled by `scenario_id`, and unavailable enrichment fields can remain unknown.
 
-- **Live Incident Card** — slides in on attack detection with attacker geo, risk score, threat intel
-- **Metric cards** — Files Scanned, Ransomware, High Risk, Incidents, Honeypot Hits, System Health
-- **Live Alerts feed** — real-time security events
-- **Incidents panel** — correlated incidents with click-through
-- **Threat timeline** — area chart of historical scores
-- **Detection heatmap** — 16-week calendar view
+The risk scorer combines configured signal categories including model/file analysis, file activity, honeypot interaction, network signal, process context, and correlation. Its output is a 0–100 prioritization score with contributing factors. It is not a calibrated probability that an attack occurred.
 
-**Incident Detail Page** (7 tabs):
-1. Overview — attack details, risk factor breakdown
-2. Attacker — IP, geo, MAC, AbuseIPDB + Shodan threat intel
-3. AI Investigate — AI-assisted investigation from actual telemetry
-4. Timeline — chronological event sequence
-5. Attack Graph — nodes/edges from source to response
-6. Evidence — forensic bundle with blockchain hash verification
-7. Replay — recorded events replayed in order
+## Cyber Lab simulations
 
----
+Cyber Lab scenarios exercise UI, event storage, and incident handling using **synthetic telemetry**. They do not scan or attack a real host, generate packets, or pass synthetic network flows to the trained packet-flow model.
 
-## Quick Start
+Simulation mode is off by default for each backend process. An authenticated user must enable **SIMULATION MODE** in the Cyber Lab before starting a scenario. The API validates the scenario against an allowlist and allows only one running scenario at a time. Stop requests cancel the running scenario cooperatively.
+
+Available scenario IDs:
+
+| Scenario | Behavior |
+| --- | --- |
+| `ransomware` | Writes synthetic demo files and a simulation ransom note under `backend/watched/`; it does not encrypt personal files. |
+| `portscan` | Emits synthetic port-scan events; does not probe real ports. |
+| `brute-force` | Emits synthetic authentication-attempt events; does not attempt real logins. |
+| `phishing` | Emits synthetic phishing-chain events and may write a demo file under `backend/watched/`; it does not send email or contact a command server. |
+| `suspicious-process` | Emits synthetic process telemetry; it does not launch a real malicious process. |
+| `data-exfiltration` | Emits synthetic data-transfer telemetry; it does not upload local data. |
+| `honeypot` | Records simulated access to decoy resources. |
+| `full-attack` | Runs a multi-stage synthetic event sequence. |
+
+Scenario events can appear in Lab/SOC event or incident views because the UI is intended to demonstrate event handling. A scenario is **not** evidence that the same attack happened on the network. Keep the simulation labels and `scenario_id` when interpreting or exporting data.
+
+To inspect or remove files created by the ransomware/phishing demonstrations, review only the explicitly named synthetic files under `backend/watched/`. Do not treat that directory as a general cleanup target; it may contain files monitored by the application.
+
+## Honeypot, evidence, and integrations
+
+### Honeypot
+
+The backend creates decoy documents under `backend/lab/honeypot/`. Their contents are fake and intended only for monitoring. A Watchdog observer looks for file activity and records observed triggers. Cyber Lab can also record scenario-tagged, simulated honeypot interactions; these are different from a real filesystem access.
+
+### Incident evidence
+
+Evidence utilities can serialize incident context, associated events, hashes, and response information into local JSON bundles under `backend/evidence/`. The bundle is SHA-256 hashed and can be checked for integrity. Blockchain anchoring is optional and depends on a correctly configured provider and contract. A hash proves equality with the recorded content, not that the original observation was accurate.
+
+### Optional integrations
+
+- **IP geolocation and reputation** — external lookups can enrich public IPs when the relevant service and key are available.
+- **Shodan / VirusTotal / AbuseIPDB** — optional lookups for IP or file-hash context; quotas and coverage are controlled by those services.
+- **AI chat and summaries** — use a configured provider such as Gemini, Groq, or OpenAI; without a valid key these features may be unavailable.
+- **Email and webhooks** — optional notifications; configure only if needed.
+- **Blockchain** — Web3 logging/verification can use Core Testnet2 or another supported RPC/contract configuration. Testnet records are not production evidence storage.
+
+External lookups may be unavailable, rate-limited, or incomplete. Never interpret missing enrichment as evidence that an IP or file is safe.
+
+## Requirements and setup
 
 ### Prerequisites
-- Python 3.10+
-- Node.js 18+
 
-### Backend
+- Windows, macOS, or Linux with Python **3.10+** and Node.js **18+**.
+- Git and npm.
+- Wireshark/TShark and Npcap are required only for packet-level capture. Install the Npcap driver during Wireshark setup on Windows.
+- A working trained-model asset set under `backend/models/` is required for the corresponding ML features. Optional DNN support depends on a compatible PyTorch installation and runtime libraries.
+
+### Install the backend
+
+From the repository root in PowerShell:
+
 ```powershell
 cd backend
 python -m venv venv
-venv\Scripts\activate
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-cp example.env .env      # edit .env with your keys
-python app.py
+Copy-Item example.env .env
 ```
 
-### Run as Administrator (full packet capture — catches nmap)
-```powershell
-backend\start_admin.bat
-```
+Edit `backend/.env` with a unique `SECRET_KEY` and any optional integration settings. Do not commit `.env` or put actual private keys into documentation, issue reports, or source files.
 
-### Frontend
+### Install the frontend
+
+Open a second terminal at the repository root:
+
 ```powershell
 cd frontend
 npm install
-npm run dev
 ```
 
-### Train Network IDS Models (optional)
-```
-1. Open Jupyter: jupyter notebook
-2. Open: notebooks/network_ids_v2.ipynb
-3. Kernel → CyberDefense AI
-4. Cell → Run All  (~15-20 min)
-```
-
----
+The frontend API client currently targets `http://localhost:5000/api`. Keep the backend on that address/port for the default local development setup.
 
 ## Configuration
 
-Copy `backend/example.env` to `backend/.env` and fill in:
+`backend/example.env` documents the supported settings. Only configure services you intend to use.
 
-```env
-# Required
-SECRET_KEY=your-secret-key
+| Setting | Purpose |
+| --- | --- |
+| `SECRET_KEY` | Signs session JWTs. Set a long, random value before use. |
+| `ETH_RPC_URL`, `CONTRACT_ADDRESS`, `WALLET_PRIVATE_KEY`, `CHAIN_ID` | Optional blockchain RPC and contract access. Never expose or commit the private key. |
+| `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY` | Optional AI chat/summary provider credentials. |
+| `ABUSEIPDB_API_KEY`, `SHODAN_API_KEY`, `VIRUSTOTAL_API_KEY` | Optional threat-intelligence API credentials. |
+| `EMAIL_ENABLED`, `EMAIL_SENDER`, `EMAIL_PASSWORD`, `EMAIL_RECEIVER` | Optional email alerts. For Gmail, use an app password rather than an account password. |
+| `WEBHOOK_URL` | Optional Slack/Discord-compatible alert webhook. Treat the URL as a secret. |
+| `IPINFO_TOKEN` | Optional geolocation provider token where supported. |
 
-# Blockchain (Core Testnet2)
-CONTRACT_ADDRESS=0x9807Ae60581B38611534d656f6a16AF28B846E17
-WALLET_PRIVATE_KEY=your_wallet_key
+Environment variable names and optional integrations can vary as modules evolve. Use `backend/example.env` as the authoritative template and check backend startup output and the health/status pages to confirm a component actually initialized.
 
-# AI Chatbot (pick one — all free)
-GEMINI_API_KEY=          # aistudio.google.com — recommended
-GROQ_API_KEY=            # console.groq.com
-OPENAI_API_KEY=          # paid
+## Running and using the application
 
-# Threat Intelligence (all optional, all free tier)
-ABUSEIPDB_API_KEY=       # abuseipdb.com — 1000/day
-SHODAN_API_KEY=          # shodan.io — 100/month
-VIRUSTOTAL_API_KEY=      # virustotal.com — 500/day
-IPINFO_TOKEN=            # ipinfo.io — 50k/month, better geo
+### Start the backend
 
-# Email Alerts
-EMAIL_ENABLED=false
-EMAIL_SENDER=your@gmail.com
-EMAIL_PASSWORD=gmail_app_password
-EMAIL_RECEIVER=analyst@example.com
+In the backend virtual environment:
 
-# Webhook (Slack/Discord)
-# WEBHOOK_URL=https://discord.com/api/webhooks/...
+```powershell
+cd backend
+.\venv\Scripts\Activate.ps1
+python app.py
 ```
 
----
+Backend API: `http://localhost:5000`
 
-## External Services
+For Windows packet capture, open an elevated terminal and run:
 
-| Service | Used For | Free Tier |
-|---------|---------|-----------|
-| ipinfo.io | IP geolocation (primary) | 50k req/month |
-| ip-api.com | IP geolocation (fallback) | 45 req/min |
-| AbuseIPDB | IP abuse reputation | 1,000 checks/day |
-| Shodan | Host fingerprinting | 100 lookups/month |
-| VirusTotal | File hash scanning | 500 req/day |
-| Gemini 2.0 Flash | AI chatbot | Generous free tier |
-| Groq Llama-3.3 | AI chatbot fallback | Free |
-| Core Testnet2 | Blockchain logging | Free testnet |
-| Gmail SMTP | Email alerts | Free |
+```powershell
+cd backend
+.\start_admin.bat
+```
 
----
+The batch file activates `backend/venv` and starts the backend. If that environment is not installed, create it and install `requirements.txt` first.
 
-## Demo Credentials
+### Start the frontend
 
-| User | Password | Role |
-|------|----------|------|
-| admin | admin123 | Full access |
-| analyst | analyst123 | Read + scan |
+In a second terminal:
 
-**URLs after startup:**
-- Dashboard: http://localhost:5173
-- SOC War Room: http://localhost:5173/soc
-- Cyber Lab: http://localhost:5173/lab
-- Incidents: http://localhost:5173/incidents
-- Backend API: http://localhost:5000
+```powershell
+cd frontend
+npm run dev
+```
 
----
+Open the Vite URL printed by the command (normally `http://localhost:5173`). Sign in, then use the workspace switcher to navigate between the SOC and Ransomware Center.
 
-## Tech Stack
+### Verify the installation
 
-| Layer | Technology |
-|-------|-----------|
-| Backend | Python 3.10, Flask, Flask-SocketIO, JWT |
-| ML (Ransomware) | scikit-learn RF, PyTorch DNN, SHAP |
-| ML (Network IDS) | scikit-learn RF, PyTorch DNN (LayerNorm), Binary RF |
-| Database | SQLite |
-| Blockchain | Solidity, Web3.py, Core Testnet2 |
-| Frontend | React 18, Vite, Tailwind CSS, Recharts |
-| Network Capture | Scapy, psutil, Windows raw sockets |
-| File Monitor | Watchdog |
-| Email | Gmail SMTP |
-| Reports | ReportLab (PDF) |
+1. Confirm the backend reports that SQLite initialized and inspect its startup output for missing model/capture/integration warnings.
+2. Open `http://localhost:5000/api/health` to check basic backend availability.
+3. Sign in through the frontend and inspect the component health and Network capture status.
+4. For real packet capture, confirm that the correct adapter is listed and capture is active before expecting packet rows.
+5. To test the Cyber Lab, enable Simulation Mode, start one scenario, and verify that events carry a simulation scenario ID.
+6. Use the Ransomware Center for file scans; the Lab ransomware scenario is only a synthetic demonstration and is not the uploaded-file scan workflow.
 
----
+### Development build
 
-<div align="center">
+```powershell
+cd frontend
+npm run build
+```
 
-Built by **Gagandeep Singh** — [@Shekhawat12082003](https://github.com/Shekhawat12082003)
+## API and real-time events
 
-*Started as a ransomware detector. Became a SOC.*
+The API base is `http://localhost:5000/api`. Login returns a bearer JWT; protected endpoints expect:
 
-</div>
+```http
+Authorization: Bearer <token>
+```
+
+The token expires after eight hours in the current implementation. The frontend stores the session locally for development use.
+
+| Area | Endpoint examples |
+| --- | --- |
+| Authentication | `POST /login`, `GET /verify-token` |
+| File analysis | `POST /upload-scan`, `POST /predict`, `GET /threats`, `GET /stats` |
+| System health | `GET /health`, `GET /system/health`, `GET /system/status` |
+| Capture and network | `GET /interfaces`, `POST /capture/start`, `POST /capture/stop`, `GET /capture/status`, `GET /flows`, `GET /alerts`, `GET /attackers`, `GET /network/stats`, `GET /network/packets` |
+| Events and incidents | `GET /events`, `GET /incidents`, `GET /incidents/<id>` and incident investigation/evidence/replay/attack-graph routes |
+| Honeypot | `GET /honeypot/status`, `GET /honeypot/files`, `GET /honeypot/triggers` |
+| Cyber Lab | `GET/POST /lab/mode`, `POST /lab/simulate`, `GET /lab/status`, `POST /lab/stop`, `POST /lab/reset`, `GET /lab/logs/<scenario_id>` |
+| Enrichment and evidence | `/geo/<ip>`, `/intel/...`, `/evidence`, `/evidence/verify`, `/risk-score` |
+| Admin | `/admin/...` routes for user and system administration |
+
+Most operational endpoints require authentication; `/health` is a basic unauthenticated liveness check. Consult `backend/app.py` for exact methods, parameters, authorization, and response shapes.
+
+Flask-SocketIO emits event types including `security_event`, `soc_update`, `live_incident`, `alert_created`, `network_alert`, `attacker_update`, `capture_status`, `sim_log`, and `honeypot_triggered`. Payload details depend on the event source. A `scenario_id` means the event came from a lab scenario and must not be confused with a live packet capture.
+
+## Data, privacy, and security
+
+- The app stores its SQLite database at `backend/cyberdefense.db`; evidence, watched files, honeypot data, and logs are stored in backend-local directories.
+- Network capture, uploaded files, event metadata, and external IP/hash lookup requests may contain sensitive data. Run only on systems and networks you are authorized to monitor.
+- Live flows and some metrics are held in process memory; restarting the backend can clear those in-memory views. SQLite-backed threat/event records persist locally.
+- The backend binds to `0.0.0.0` in its current run configuration. Keep it on a trusted network, apply firewall rules, and do not expose the development server directly to the public internet.
+- The default development accounts are seeded only when the users table is empty: `admin` / `admin123` and `analyst` / `analyst123`. Change/remove defaults before using the app beyond a disposable local demo.
+- Set a strong `SECRET_KEY`; the backend has a development fallback if it is missing. Do not rely on that fallback for any shared or deployed environment.
+- Do not enable optional integrations unless required. API keys, blockchain signing keys, webhook URLs, and email credentials must remain private.
+- Simulation mode controls synthetic scenario starts; it does not toggle or disable the live capture pipeline.
+
+## Troubleshooting
+
+### Frontend stays on a loading screen
+
+- Confirm the backend is running on `localhost:5000` and `/api/health` responds.
+- Check the browser developer console and network panel for API errors.
+- Confirm a token exists and is valid; sign out and back in if it has expired.
+- Dashboard data requests have a finite timeout, but the browser cannot display live data if the backend is stopped or the API URL is incorrect.
+
+### No packets or live traffic
+
+- Check the Network page and `/api/capture/status`; `is_capturing` should be true and packet count should increase.
+- Run `tshark -D` to check that TShark can list interfaces. Ensure the selected interface is the active Wi-Fi/Ethernet adapter, not a disconnected VPN or loopback interface.
+- On Windows verify Npcap is installed, capture permissions are sufficient, and the backend was started elevated if required.
+- Generate ordinary traffic from the same host to check host-visible capture. Other Wi-Fi clients' traffic is not generally visible in normal client mode.
+- If capture is unavailable, the OS-connection fallback is not equivalent to packet capture; it will not supply packet rows or flow-model confirmations.
+- Review backend logs for TShark executable, adapter, access, or model-feature errors.
+
+### No model-verified network alerts
+
+- Confirm the trained network RF/scaler/label-encoder files and `network_model_info.json` are present and compatible in `backend/models/`.
+- Check model status and startup logs. An unavailable optional DNN does not necessarily mean RF is unavailable, but a missing or incompatible required classifier does.
+- The flow must contain the complete feature schema, be classed as non-benign, and meet the 70% confidence gate. Benign traffic and incomplete/low-confidence flows correctly do not create confirmed alerts.
+
+### Cyber Lab cannot start a scenario
+
+- Sign in and switch **SIMULATION MODE** on in the Lab page.
+- Confirm the backend is running the current code; the mode flag is process-local and resets when the backend restarts.
+- Only one scenario may run at a time. Stop it and wait for status to clear before starting another.
+- Use one of the scenario IDs in the [Cyber Lab table](#cyber-lab-simulations). The endpoint rejects unknown scenario types.
+- Lab simulations create synthetic events and do not create Wi-Fi packets or model-verified network detections.
+
+### Geolocation or threat intelligence displays unknown/unavailable
+
+- Private or local IP addresses are not publicly geolocatable.
+- Public-IP enrichment needs network connectivity and may require the provider API key. Providers can rate-limit requests or have incomplete records.
+- Unknown fields should remain unknown rather than be interpreted as a confirmed identity.
+
+### Blockchain, email, or AI unavailable
+
+- These are optional components. Check `.env` values, backend startup messages, provider/network availability, and service quotas.
+- Testnet writes require a funded test wallet and a compatible contract configuration. Never use a production wallet key in a local demo.
+
+## Tests and development
+
+Run the backend regression tests from the repository root:
+
+```powershell
+python -m unittest backend.tests.test_network_verification backend.tests.test_attack_director
+```
+
+Compile the changed/backend Python modules:
+
+```powershell
+python -m py_compile backend\app.py backend\utils\attack_director.py
+```
+
+Build the frontend:
+
+```powershell
+cd frontend
+npm run build
+```
+
+Tests cover network feature extraction and verification guards as well as simulation scenario state/stop behavior. A passing test suite does not validate capture visibility on a particular adapter, external service access, model quality on new traffic, or blockchain connectivity.
+
+## Repository map
+
+```text
+backend/
+  app.py                    Flask API, auth, initialization, capture wiring, event callbacks
+  cyberdefense_cli.py       Command-line client for the Cyber Lab API
+  models/
+    threat_scorer.py        PE/ransomware classifier
+    network_scorer.py       Trained network-flow classifier and verification gate
+    network_monitor.py      OS connection monitoring and candidate detection
+    file_monitor.py         PE feature extraction and watched-directory monitoring
+    *.pkl, *.pth, *.json    Trained models, encoders, metadata, feature lists
+  tests/                    Focused backend regression tests
+  utils/
+    attack_director.py      Synthetic lab scenarios
+    db.py                   SQLite persistence and user/audit helpers
+    event_schema.py         Unified security-event representation
+    flow_extractor.py       Packet-to-flow feature generation
+    forensic_evidence.py    Local evidence bundle/hash utilities
+    honeypot.py             Decoy setup, watcher, and trigger storage
+    incident_manager.py     Incident lifecycle and persistence
+    risk_scorer.py          Explainable signal-based risk score
+    threat_intel.py         Optional IP/hash enrichment
+    tshark_capture.py       TShark capture process and packet parsing
+frontend/
+  src/App.jsx               Routes, login/session gate, admin gate
+  src/api.js                HTTP client and API wrappers
+  src/components/           Shared workspace and incident components
+  src/pages/                SOC, Network, Lab, incidents, ransomware, and other pages
+  package.json              Vite scripts and frontend dependencies
+read.md                     This detailed operator and architecture guide
+```
+
+## Known limitations
+
+- Packet visibility depends on the operating system, interface, Npcap/TShark permissions, network topology, and Wi-Fi adapter mode.
+- The live network model uses the feature schema recorded in its metadata. Training/evaluation metrics describe a dataset run, not guaranteed field accuracy.
+- The file classifier is specific to its PE feature representation; it does not inspect every file type or prove whether arbitrary content is safe.
+- Geolocation and external intelligence are best-effort, optional, and subject to provider coverage and rate limits.
+- Some dashboards mix persistent historical records with process-local live state; restarting the backend can change what appears in live counters.
+- Cyber Lab output is generated telemetry. It is useful for checking the event/incident presentation path but does not validate packet capture or the network classifier.
+- This repository is a development application. Review authentication, password handling, CORS, secrets, logging, and deployment configuration before any production or multi-user exposure.

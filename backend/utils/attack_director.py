@@ -3,12 +3,11 @@ Attack Director — Safe Simulation Engine for CyberDefense-AI
 Generates controlled, representative telemetry for the SOC demo.
 All simulations are contained within the lab environment.
 No real malware, no real encryption, no real network attacks.
-All simulations run through the existing detection pipeline.
+Simulation telemetry is separate from packet capture and trained-model verification.
 """
 import os
 import json
 import uuid
-import time
 import random
 import struct
 import string
@@ -33,10 +32,15 @@ HONEYPOT_DIR = os.path.join(LAB_DIR, 'honeypot')
 # Simulation state
 _active_scenario: Optional[str] = None
 _scenario_status: dict = {}
+_scenario_cancel_events: dict = {}
 _output_callbacks: list = []
 _event_callbacks:  list = []
 
 _lock = threading.Lock()
+
+
+class _SimulationStopped(Exception):
+    pass
 
 
 # ─────────────────────────────────────────────────────────
@@ -141,7 +145,12 @@ def _start_scenario(name: str) -> str:
     global _active_scenario
     scenario_id = f'{name}_{_rand_suffix(8)}'
     with _lock:
+        if _active_scenario:
+            status = _scenario_status.get(_active_scenario, {}).get('status')
+            if status in ('RUNNING', 'STOPPING'):
+                raise RuntimeError('A simulation is already running')
         _active_scenario = scenario_id
+        _scenario_cancel_events[scenario_id] = threading.Event()
         _scenario_status[scenario_id] = {
             'name':       name,
             'status':     'RUNNING',
@@ -155,9 +164,33 @@ def _end_scenario(scenario_id: str, status: str = 'COMPLETED'):
     global _active_scenario
     with _lock:
         if scenario_id in _scenario_status:
-            _scenario_status[scenario_id]['status'] = status
+            previous_status = _scenario_status[scenario_id]['status']
+            _scenario_status[scenario_id]['status'] = (
+                'STOPPED' if previous_status == 'STOPPING' else status
+            )
             _scenario_status[scenario_id]['ended_at'] = datetime.utcnow().isoformat()
-        _active_scenario = None
+        if _active_scenario == scenario_id:
+            _active_scenario = None
+        _scenario_cancel_events.pop(scenario_id, None)
+
+
+def request_stop_scenario(scenario_id: str) -> bool:
+    with _lock:
+        status = _scenario_status.get(scenario_id, {}).get('status')
+        if status != 'RUNNING':
+            return False
+        _scenario_status[scenario_id]['status'] = 'STOPPING'
+        cancel_event = _scenario_cancel_events.get(scenario_id)
+        if cancel_event:
+            cancel_event.set()
+        return True
+
+
+def _pause(scenario_id: str, seconds: float):
+    with _lock:
+        cancel_event = _scenario_cancel_events.get(scenario_id)
+    if cancel_event and cancel_event.wait(seconds):
+        raise _SimulationStopped()
 
 
 def _add_step(scenario_id: str, step: str):
@@ -255,7 +288,7 @@ def simulate_ransomware(scenario_id: str = None) -> str:
                 description=f'Ransomware dropper deployed: {dropper_name}',
             )
             _emit_event(evt)
-            time.sleep(1.5)
+            _pause(sid, 1.5)
 
             # Stage 2: Main payload files
             _log('  Phase 2: Encryption engine', sid)
@@ -276,7 +309,7 @@ def simulate_ransomware(scenario_id: str = None) -> str:
                     description=f'Ransomware payload: {fname}',
                 )
                 _emit_event(evt)
-                time.sleep(1.2)
+                _pause(sid, 1.2)
 
             # Stage 3: Honeypot access simulation
             _log('  Phase 3: Honeypot interaction', sid)
@@ -307,6 +340,8 @@ def simulate_ransomware(scenario_id: str = None) -> str:
             _log(f'✅ Ransomware simulation complete ({len(files_created)} files)', sid)
             _add_step(sid, 'RANSOMWARE_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Ransomware simulation error: {e}', sid)
         finally:
@@ -345,7 +380,7 @@ def simulate_portscan(scenario_id: str = None) -> str:
                     description=f'Port scan: {src_ip}:{_rand_port()} → {local_ip}:{port}',
                 )
                 _emit_event(evt)
-                time.sleep(0.08)
+                _pause(sid, 0.08)
 
             # Emit a consolidated alert
             alert = {
@@ -362,6 +397,8 @@ def simulate_portscan(scenario_id: str = None) -> str:
             _log(f'✅ Port scan simulation complete', sid)
             _add_step(sid, 'PORTSCAN_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Port scan error: {e}', sid)
         finally:
@@ -399,7 +436,7 @@ def simulate_bruteforce(scenario_id: str = None) -> str:
                     description=f'Brute force attempt {i+1}/{attempts} on {service}:{port}',
                 )
                 _emit_event(evt)
-                time.sleep(0.15)
+                _pause(sid, 0.15)
 
             alert = {
                 'timestamp':        datetime.utcnow().isoformat(),
@@ -416,6 +453,8 @@ def simulate_bruteforce(scenario_id: str = None) -> str:
             _log(f'✅ Brute force simulation complete', sid)
             _add_step(sid, 'BRUTEFORCE_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Brute force error: {e}', sid)
         finally:
@@ -448,7 +487,7 @@ def simulate_phishing(scenario_id: str = None) -> str:
                 description='Suspicious email attachment opened',
             )
             _emit_event(evt)
-            time.sleep(1)
+            _pause(sid, 1)
 
             # Stage 2: Payload execution
             _log('  Stage 2: Payload process spawned', sid)
@@ -469,7 +508,7 @@ def simulate_phishing(scenario_id: str = None) -> str:
                 description=f'Phishing payload executed: {payload_name}',
             )
             _emit_event(evt)
-            time.sleep(1)
+            _pause(sid, 1)
 
             # Stage 3: C2 connection
             _log('  Stage 3: C2 beacon attempt', sid)
@@ -484,11 +523,13 @@ def simulate_phishing(scenario_id: str = None) -> str:
                     description=f'C2 beacon: {c2_ip} → {_get_local_ip()}:443',
                 )
                 _emit_event(evt)
-                time.sleep(0.5)
+                _pause(sid, 0.5)
 
             _log('✅ Phishing simulation complete', sid)
             _add_step(sid, 'PHISHING_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Phishing error: {e}', sid)
         finally:
@@ -540,7 +581,7 @@ def simulate_suspicious_process(scenario_id: str = None) -> str:
                 description=f'Suspicious process: {proc_name} PID={pid}',
             )
             _emit_event(evt)
-            time.sleep(1)
+            _pause(sid, 1)
 
             # Simulate honeypot access by suspicious process
             _log('  Process accessing honeypot resources...', sid)
@@ -557,6 +598,8 @@ def simulate_suspicious_process(scenario_id: str = None) -> str:
             _log('✅ Suspicious process simulation complete', sid)
             _add_step(sid, 'PROCESS_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Suspicious process error: {e}', sid)
         finally:
@@ -585,7 +628,7 @@ def simulate_data_exfiltration(scenario_id: str = None) -> str:
             # Access honeypot data first
             _log('  Accessing sensitive honeypot files...', sid)
             _simulate_honeypot_access(sid, src_ip, 'data_stealer.exe')
-            time.sleep(0.5)
+            _pause(sid, 0.5)
 
             # Exfil event
             evt = _build_event(
@@ -613,6 +656,8 @@ def simulate_data_exfiltration(scenario_id: str = None) -> str:
             _log('✅ Data exfiltration simulation complete', sid)
             _add_step(sid, 'EXFIL_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Exfil error: {e}', sid)
         finally:
@@ -642,6 +687,8 @@ def simulate_honeypot_access(scenario_id: str = None) -> str:
             _log('✅ Honeypot simulation complete', sid)
             _add_step(sid, 'HONEYPOT_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Honeypot error: {e}', sid)
         finally:
@@ -655,8 +702,7 @@ def simulate_honeypot_access(scenario_id: str = None) -> str:
 def simulate_full_attack(scenario_id: str = None) -> str:
     """
     Multi-stage full attack simulation.
-    Runs all stages in sequence through the real detection pipeline.
-    Each stage generates events that feed the correlation engine.
+    Runs all stages in sequence and emits synthetic lab telemetry.
     """
     sid = scenario_id or _start_scenario('full_attack')
     _log('🚀 === FULL ATTACK SIMULATION ===', sid)
@@ -682,9 +728,9 @@ def simulate_full_attack(scenario_id: str = None) -> str:
                     description=f'Recon port scan: {src_ip} → {local_ip}:{port}',
                 )
                 _emit_event(evt)
-                time.sleep(0.3)
+                _pause(sid, 0.3)
             _log(f'     Port scan: {len(ports)} ports probed', sid)
-            time.sleep(1)
+            _pause(sid, 1)
 
             # ── Stage 2: Suspicious Activity ─────────────────
             _log('\n  STAGE 2: Suspicious Activity', sid)
@@ -699,9 +745,9 @@ def simulate_full_attack(scenario_id: str = None) -> str:
                     description=f'Auth brute force attempt {i+1} on port {brute_port}',
                 )
                 _emit_event(evt)
-                time.sleep(0.2)
+                _pause(sid, 0.2)
             _log(f'     Brute force: 5 attempts on port {brute_port}', sid)
-            time.sleep(1)
+            _pause(sid, 1)
 
             # ── Stage 3: Suspicious Process ───────────────────
             _log('\n  STAGE 3: Suspicious Process', sid)
@@ -717,13 +763,13 @@ def simulate_full_attack(scenario_id: str = None) -> str:
             )
             _emit_event(evt)
             _log(f'     Process: {proc_name} (PID {pid})', sid)
-            time.sleep(1.5)
+            _pause(sid, 1.5)
 
             # ── Stage 4: Honeypot Interaction ─────────────────
             _log('\n  STAGE 4: Honeypot Interaction', sid)
             _add_step(sid, 'STAGE_4_HONEYPOT')
             _simulate_honeypot_access(sid, src_ip, proc_name, count=3)
-            time.sleep(1)
+            _pause(sid, 1)
 
             # ── Stage 5: File Activity ────────────────────────
             _log('\n  STAGE 5: File Activity (ML Detection)', sid)
@@ -750,7 +796,7 @@ def simulate_full_attack(scenario_id: str = None) -> str:
                     description=f'Ransomware file created: {fname}',
                 )
                 _emit_event(evt)
-                time.sleep(1.2)
+                _pause(sid, 1.2)
 
             _log(f'     {file_count} malicious files deployed', sid)
 
@@ -768,7 +814,7 @@ def simulate_full_attack(scenario_id: str = None) -> str:
             exfil_evt['_exfil_mb'] = mb_sim
             _emit_event(exfil_evt)
             _log(f'     Exfiltration: {mb_sim} MB simulated', sid)
-            time.sleep(1)
+            _pause(sid, 1)
 
             # ── Stage 7: Ransom Note ──────────────────────────
             _log('\n  STAGE 7: Ransom Note', sid)
@@ -782,7 +828,7 @@ def simulate_full_attack(scenario_id: str = None) -> str:
                     f'BTC Address: 1SIMDEMO{_rand_suffix(20)}\n'
                 )
             _log('     Ransom note dropped', sid)
-            time.sleep(0.5)
+            _pause(sid, 0.5)
 
             _log('\n  ✅ FULL ATTACK SIMULATION COMPLETE', sid)
             _log(f'     Source IP: {src_ip}', sid)
@@ -791,6 +837,8 @@ def simulate_full_attack(scenario_id: str = None) -> str:
             _log(f'     Honeypots: 3 triggered', sid)
             _add_step(sid, 'FULL_ATTACK_COMPLETE')
 
+        except _SimulationStopped:
+            pass
         except Exception as e:
             _log(f'❌ Full attack error: {e}', sid)
         finally:
@@ -840,8 +888,10 @@ def _simulate_honeypot_access(
             )
             _emit_event(evt)
             _log(f'     🍯 HONEYPOT: {resource} accessed by {process_name}', scenario_id)
-            time.sleep(0.3)
+            _pause(scenario_id, 0.3)
 
+    except _SimulationStopped:
+        raise
     except Exception as e:
         _log(f'     ⚠️  Honeypot record failed: {e}', scenario_id)
 
