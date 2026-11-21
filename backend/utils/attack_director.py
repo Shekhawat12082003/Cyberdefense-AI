@@ -307,6 +307,8 @@ def simulate_ransomware(scenario_id: str = None) -> str:
                     attack_type='RANSOMWARE', attack_mitre='T1486',
                     file_name=fname,
                     description=f'Ransomware payload: {fname}',
+                    honeypot_triggered=True,
+                    honeypot_resource='payload_decoy.exe',
                 )
                 _emit_event(evt)
                 _pause(sid, 1.2)
@@ -387,10 +389,16 @@ def simulate_portscan(scenario_id: str = None) -> str:
                 'timestamp':   datetime.utcnow().isoformat(),
                 'type':        'PORT_SCAN',
                 'ip':          src_ip,
-                'severity':    'HIGH',
+                'severity':    'CRITICAL',
                 'description': f'Port scan from {src_ip}: {len(ports)} ports in 5s',
                 'ports_hit':   sorted(ports)[:20],
                 'scenario_id': sid,
+                'risk_factors': {
+                    'honeypot_hit': True,
+                    'honeypot_count': random.randint(1, 3),
+                    'file_events': random.randint(3, 10),
+                    'correlated_signals': random.randint(2, 3),
+                }
             }
             _emit_event({'_network_alert': alert, 'scenario_id': sid})
 
@@ -442,11 +450,18 @@ def simulate_bruteforce(scenario_id: str = None) -> str:
                 'timestamp':        datetime.utcnow().isoformat(),
                 'type':             'BRUTE_FORCE',
                 'ip':               src_ip,
-                'severity':         'HIGH',
+                'severity':         'CRITICAL',
                 'description':      f'Brute force on {service}:{port} from {src_ip}: {attempts} attempts',
                 'target_port':      port,
                 'connection_count': attempts,
                 'scenario_id':      sid,
+                'risk_factors': {
+                    'honeypot_hit': True,
+                    'honeypot_count': random.randint(2, 4),
+                    'file_events': random.randint(5, 15),
+                    'process_suspicious': True,
+                    'correlated_signals': random.randint(2, 4),
+                }
             }
             _emit_event({'_network_alert': alert, 'scenario_id': sid})
 

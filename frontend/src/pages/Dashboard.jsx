@@ -159,9 +159,10 @@ const AlertRow = ({ alert, onClick }) => {
 }
 
 // ── Attacker Profile ───────────────────────────────────────
-const AttackerProfile = ({ ip, intel, loading, error, onClose, onRetry }) => {
+const AttackerProfile = ({ ip, intel, loading, error, onClose, onRetry, storedGeo }) => {
   if (!ip) return null
-  const geo = intel?.geo || {}
+  // Use stored geo_info from incident first, then fallback to API lookup
+  const geo = storedGeo || intel?.geo || {}
   const abuse = intel?.abuse || {}
   const shodan = intel?.shodan || {}
 
@@ -196,6 +197,22 @@ const AttackerProfile = ({ ip, intel, loading, error, onClose, onRetry }) => {
           <div style={m(11, C.blue)}>Looking up IP location…</div>
         ) : geo.type === 'private' ? (
           <div style={m(12, C.blue)}>LOCAL NETWORK — public geolocation is not applicable</div>
+        ) : geo.type === 'simulated' ? (
+          <>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>COUNTRY</span>
+              <div style={m(11, C.text)}>{geo.country || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>CITY</span>
+              <div style={m(11, C.text)}>{geo.city || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>REGION</span>
+              <div style={m(11, C.text)}>{geo.region || 'Unknown'}</div>
+            </div>
+            {geo.note && <div style={{ ...m(9, C.muted), lineHeight: 1.5 }}>{geo.note}</div>}
+          </>
         ) : geo.type === 'unknown' || !geo.type ? (
           <div style={{ ...m(11, C.orange), lineHeight: 1.6 }}>
             <div>{error || geo.note || 'Geolocation lookup unavailable.'}</div>
@@ -232,18 +249,38 @@ const AttackerProfile = ({ ip, intel, loading, error, onClose, onRetry }) => {
 
       <div style={cardStyle({ marginBottom: 16 })}>
         <div style={sLabel}>NETWORK INFO</div>
-        <div style={{ marginBottom: 8 }}>
-          <span style={m(9, C.muted)}>ISP</span>
-          <div style={m(11, C.text)}>{geo.isp || abuse.isp || 'Unknown'}</div>
-        </div>
-        <div style={{ marginBottom: 8 }}>
-          <span style={m(9, C.muted)}>ASN</span>
-          <div style={m(11, C.text)}>{geo.asn || abuse.asn || 'Unknown'}</div>
-        </div>
-        <div style={{ marginBottom: 8 }}>
-          <span style={m(9, C.muted)}>ORGANIZATION</span>
-          <div style={m(11, C.text)}>{geo.org || abuse.org || 'Unknown'}</div>
-        </div>
+        {geo.type === 'simulated' ? (
+          <>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>ISP</span>
+              <div style={m(11, C.text)}>{geo.isp || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>ASN</span>
+              <div style={m(11, C.text)}>{geo.asn || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>ORGANIZATION</span>
+              <div style={m(11, C.text)}>{geo.org || 'Unknown'}</div>
+            </div>
+            <div style={{ ...m(9, C.muted), lineHeight: 1.5 }}>{geo.note}</div>
+          </>
+        ) : (
+          <>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>ISP</span>
+              <div style={m(11, C.text)}>{geo.isp || abuse.isp || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>ASN</span>
+              <div style={m(11, C.text)}>{geo.asn || abuse.asn || 'Unknown'}</div>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span style={m(9, C.muted)}>ORGANIZATION</span>
+              <div style={m(11, C.text)}>{geo.org || abuse.org || 'Unknown'}</div>
+            </div>
+          </>
+        )}
       </div>
 
       {abuse.confidence_score !== undefined && (
@@ -306,6 +343,7 @@ export default function Dashboard() {
   const [connections, setConnections] = useState([])
   const [packets, setPackets] = useState([])
   const [selectedAttackerIP, setSelectedAttackerIP] = useState(null)
+  const [selectedAttackerGeo, setSelectedAttackerGeo] = useState(null)
   const [attackerIntel, setAttackerIntel] = useState(null)
   const [attackerIntelLoading, setAttackerIntelLoading] = useState(false)
   const [attackerIntelError, setAttackerIntelError] = useState('')
@@ -340,7 +378,7 @@ export default function Dashboard() {
       ] = await Promise.all([
         request(getStats(), {}, 'Stats'),
         request(getThreats(), [], 'Threats'),
-        request(getIncidents(), { incidents: [] }, 'Incidents'),
+        request(getIncidents({ limit: 1000000 }), { incidents: [] }, 'Incidents'),
         request(getHoneypotStatus(), {}, 'Honeypot status'),
         request(getLabStatus(), {}, 'Lab status'),
         request(getSecurityEvents(), { events: [] }, 'Events'),
@@ -366,9 +404,7 @@ export default function Dashboard() {
       }
       captureModeRef.current = nextNetworkStats.capture_mode
       setNetworkStats(nextNetworkStats)
-      setNetworkAlerts((netAlertsRes.data.alerts || []).filter(alert =>
-        alert.is_verified === true && alert.verification === 'trained_network_ids'
-      ))
+      setNetworkAlerts((netAlertsRes.data.alerts || []))
       setHpTriggers(hpTriggersRes.data.triggers || [])
       setHpHitsToday(Number(hpTriggersRes.data.verified_hits_today || 0))
       setHpFiles(hpFilesRes.data.files || [])
@@ -563,7 +599,25 @@ export default function Dashboard() {
     setAttackerIntel(null)
     setAttackerIntelError('')
     setAttackerIntelLoading(true)
-    Promise.allSettled([geolocateIP(selectedAttackerIP), enrichIP(selectedAttackerIP)])
+    
+    // Check if IP is private
+    const isPrivateIP = (ip) => {
+      if (!ip) return false
+      const parts = ip.split('.')
+      if (parts.length !== 4) return false
+      const [a, b, c, d] = parts.map(Number)
+      return (
+        a === 10 ||
+        (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) ||
+        a === 127 ||
+        (a === 169 && b === 254)
+      )
+    }
+    
+    const isPrivate = isPrivateIP(selectedAttackerIP)
+    
+    Promise.allSettled([geolocateIP(selectedAttackerIP, isPrivate), enrichIP(selectedAttackerIP)])
       .then(([geoResult, intelResult]) => {
         if (cancelled) return
         const nextIntel = {}
@@ -636,12 +690,15 @@ export default function Dashboard() {
     return sourceIP && normalizedIP !== 'unknown' && !isLoopback &&
       normalizedIP !== localIP.toLowerCase() && !alert.scenario_id
   })
-  const attackers = [...new Set(verifiedLiveAlerts.map(a => a.attacker_ip || a.src_ip || a.ip).filter(Boolean))]
+  // Include all alerts including simulated incidents for display
+  const allAlerts = networkAlerts
+  const attackers = [...new Set(allAlerts.map(a => a.attacker_ip || a.src_ip || a.ip).filter(Boolean))]
   const today = new Date().toDateString()
-  const attacksToday = verifiedLiveAlerts.filter(alert => {
+  const attacksToday = allAlerts.filter(alert => {
     const timestamp = alert.timestamp || alert.created_at
     return timestamp && new Date(timestamp).toDateString() === today
   }).length
+  const criticalAlerts = allAlerts.filter(a => a.severity === 'CRITICAL').length
 
   return (
     <div style={{ minHeight: '100vh', background: C.bg, padding: 20, fontFamily: 'monospace' }}>
@@ -686,9 +743,9 @@ export default function Dashboard() {
           {/* Overview Metrics */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
             <MetricCard label="ACTIVE CONNECTIONS" value={networkStats?.total_connections || connections.length || 0} color={C.blue} icon="🌐" />
-            <MetricCard label="ACTIVE THREATS" value={threats.filter(t => t.status === 'quarantined').length || 0} color={C.red} icon="🚨" />
-            <MetricCard label="CRITICAL ALERTS" value={verifiedLiveAlerts.filter(a => a.severity === 'CRITICAL').length} color={C.orange} icon="⚠️" />
-            <MetricCard label="UNIQUE ATTACKERS" value={new Set(verifiedLiveAlerts.map(a => a.attacker_ip || a.src_ip || a.ip)).size} color={C.purple} icon="👤" />
+            <MetricCard label="ACTIVE THREATS" value={incidents.filter(i => i.status === 'ACTIVE').length || 0} color={C.red} icon="🚨" />
+            <MetricCard label="CRITICAL ALERTS" value={criticalAlerts} color={C.orange} icon="⚠️" />
+            <MetricCard label="UNIQUE ATTACKERS" value={attackers.length} color={C.purple} icon="👤" />
             <MetricCard label="VERIFIED HONEYPOT HITS TODAY" value={hpHitsToday} color={C.yellow} icon="🍯" />
             <MetricCard label="NETWORK ATTACKS TODAY" value={attacksToday} color={C.green} icon="📊" />
             <MetricCard label="RISK SCORE" value={stats?.avg_risk_score?.toFixed(0) || 0} color={stats?.avg_risk_score > 50 ? C.red : C.green} icon="📈" />
@@ -757,6 +814,7 @@ export default function Dashboard() {
                   <NetworkFlowRow key={flow.number || `${flow.src_ip}-${flow.src_port}-${i}`} flow={flow} onClick={(f) => {
                     if (f.risk_score > 50 || f.isSuspicious) {
                       setSelectedAttackerIP(f.src_ip || f.remote_ip)
+                      setSelectedAttackerGeo(null)
                     }
                   }} />
                 ))}
@@ -798,11 +856,11 @@ export default function Dashboard() {
           {/* Security Alerts Section */}
           <div style={cardStyle({ marginBottom: 24 })}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <div style={sLabel}>VERIFIED LIVE NETWORK ALERTS</div>
+              <div style={sLabel}>LIVE NETWORK ALERTS & INCIDENTS</div>
               <div style={{ display: 'flex', gap: 8 }}>
-                <span style={m(10, C.red)}>{verifiedLiveAlerts.filter(a => a.severity === 'CRITICAL').length} Critical</span>
-                <span style={m(10, C.orange)}>{verifiedLiveAlerts.filter(a => a.severity === 'HIGH').length} High</span>
-                <span style={m(10, C.yellow)}>{verifiedLiveAlerts.filter(a => a.severity === 'MEDIUM').length} Medium</span>
+                <span style={m(10, C.red)}>{allAlerts.filter(a => a.severity === 'CRITICAL').length} Critical</span>
+                <span style={m(10, C.orange)}>{allAlerts.filter(a => a.severity === 'HIGH').length} High</span>
+                <span style={m(10, C.yellow)}>{allAlerts.filter(a => a.severity === 'MEDIUM').length} Medium</span>
               </div>
             </div>
             <div style={{ borderBottom: '1px solid #222', paddingBottom: 8, marginBottom: 8, display: 'grid', gridTemplateColumns: '100px 140px 140px 120px 80px 80px 100px', gap: 10 }}>
@@ -815,11 +873,11 @@ export default function Dashboard() {
               <span style={m(9, C.muted)}>TIME</span>
             </div>
             <div style={{ maxHeight: 300, overflow: 'auto' }}>
-              {verifiedLiveAlerts.length === 0 ? (
+              {allAlerts.length === 0 ? (
                 <div style={{ ...m(10, C.muted), padding: 24, textAlign: 'center' }}>
-                  No verified live network alerts. Historical incidents remain available in Incident Management.
+                  No alerts. Run a simulation in Cyber Lab to generate test data.
                 </div>
-              ) : verifiedLiveAlerts.slice(0, 30).map((alert, i) => {
+              ) : allAlerts.slice(0, 30).map((alert, i) => {
                 // Map backend alert format to frontend format
                 const mappedAlert = {
                   severity: alert.severity || 'MEDIUM',
@@ -827,10 +885,22 @@ export default function Dashboard() {
                   attacker_ip: alert.attacker_ip || alert.ip || alert.src_ip || 'Unknown',
                   target_ip: alert.target_ip || alert.dst_ip || alert.extra?.target_ip || 'Unknown',
                   target_port: alert.target_port || alert.port || alert.extra?.target_port || '-',
-                  confidence: alert.confidence || 0,
+                  confidence: alert.confidence || alert.risk_score || 0,
                   timestamp: alert.timestamp || alert.created_at || new Date().toISOString(),
                 }
-                return <AlertRow key={i} alert={mappedAlert} onClick={(a) => setSelectedAttackerIP(a.attacker_ip)} />
+                return <AlertRow key={i} alert={mappedAlert} onClick={(a) => {
+                  setSelectedAttackerIP(a.attacker_ip)
+                  // Use stored geo_info from incident if available
+                  if (alert.geo_info) {
+                    try {
+                      setSelectedAttackerGeo(typeof alert.geo_info === 'string' ? JSON.parse(alert.geo_info) : alert.geo_info)
+                    } catch (e) {
+                      setSelectedAttackerGeo(null)
+                    }
+                  } else {
+                    setSelectedAttackerGeo(null)
+                  }
+                }} />
               })}
             </div>
           </div>
@@ -840,10 +910,21 @@ export default function Dashboard() {
             <div style={cardStyle()}>
               <div style={sLabel}>DETECTED ATTACKERS</div>
               <div style={{ maxHeight: 300, overflow: 'auto' }}>
-                {attackers.map((ip, i) => (
+                {attackers.length === 0 ? (
+                  <div style={{ ...m(10, C.muted), padding: 24, textAlign: 'center' }}>
+                    No attackers detected yet.
+                  </div>
+                ) : attackers.map((ip, i) => {
+                  // Find an incident with this IP to get stored geo_info
+                  const incidentWithGeo = incidents.find(inc => inc.source_ip === ip && inc.geo_info)
+                  const storedGeo = incidentWithGeo ? (typeof incidentWithGeo.geo_info === 'string' ? JSON.parse(incidentWithGeo.geo_info) : incidentWithGeo.geo_info) : null
+                  return (
                   <div
                     key={i}
-                    onClick={() => setSelectedAttackerIP(ip)}
+                    onClick={() => {
+                      setSelectedAttackerIP(ip)
+                      setSelectedAttackerGeo(storedGeo)
+                    }}
                     style={{
                       padding: '12px 16px', borderBottom: '1px solid #111',
                       cursor: 'pointer', display: 'flex', justifyContent: 'space-between',
@@ -853,14 +934,15 @@ export default function Dashboard() {
                     <div>
                       <div style={{ ...m(12, C.blue), fontWeight: 'bold' }}>{ip}</div>
                       <div style={m(9, C.muted)}>
-                        {verifiedLiveAlerts.filter(a => (a.attacker_ip || a.src_ip || a.ip) === ip).length} verified alerts
+                        {allAlerts.filter(a => (a.attacker_ip || a.src_ip || a.ip) === ip).length} alerts
                       </div>
                     </div>
                     <button style={{ padding: '6px 12px', background: C.blue + '22', border: `1px solid ${C.blue}`, borderRadius: 4, ...m(10, C.blue), cursor: 'pointer' }}>
                       VIEW PROFILE
                     </button>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
 
@@ -957,7 +1039,7 @@ export default function Dashboard() {
               <div style={{ maxHeight: 200, overflow: 'auto' }}>
                 {Object.entries(
                   incidents.reduce((acc, i) => {
-                    const ip = i.attacker?.ip
+                    const ip = i.source_ip
                     if (ip) acc[ip] = (acc[ip] || 0) + 1
                     return acc
                   }, {})
@@ -970,6 +1052,13 @@ export default function Dashboard() {
                       <span style={m(10, C.muted)}>{count} attacks</span>
                     </div>
                   ))}
+                {Object.keys(incidents.reduce((acc, i) => {
+                  const ip = i.source_ip
+                  if (ip) acc[ip] = (acc[ip] || 0) + 1
+                  return acc
+                }, {})).length === 0 && (
+                  <div style={{ ...m(10, C.muted), padding: 12 }}>No attackers yet</div>
+                )}
               </div>
             </div>
 
@@ -978,7 +1067,7 @@ export default function Dashboard() {
               <div style={{ maxHeight: 200, overflow: 'auto' }}>
                 {Object.entries(
                   incidents.reduce((acc, i) => {
-                    const port = i.network?.target_port
+                    const port = i.dest_port
                     if (port) acc[port] = (acc[port] || 0) + 1
                     return acc
                   }, {})
@@ -991,6 +1080,13 @@ export default function Dashboard() {
                       <span style={m(10, C.muted)}>{count} times</span>
                     </div>
                   ))}
+                {Object.keys(incidents.reduce((acc, i) => {
+                  const port = i.dest_port
+                  if (port) acc[port] = (acc[port] || 0) + 1
+                  return acc
+                }, {})).length === 0 && (
+                  <div style={{ ...m(10, C.muted), padding: 12 }}>No port data yet</div>
+                )}
               </div>
             </div>
           </div>
@@ -1004,8 +1100,9 @@ export default function Dashboard() {
           intel={attackerIntel}
           loading={attackerIntelLoading}
           error={attackerIntelError}
+          storedGeo={selectedAttackerGeo}
           onRetry={() => setAttackerIntelRetry(value => value + 1)}
-          onClose={() => { setSelectedAttackerIP(null); setAttackerIntel(null) }}
+          onClose={() => { setSelectedAttackerIP(null); setAttackerIntel(null); setSelectedAttackerGeo(null) }}
         />
       )}
 

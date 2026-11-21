@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { io } from 'socket.io-client'
-import { getIncidents } from '../api'
+import { getIncidents, bulkCloseIncidents } from '../api'
 
 const mono = (sz = 13, c = '#fff') => ({ fontFamily: 'monospace', fontSize: sz, color: c })
 const card = (border = '#00d4ff22') => ({
@@ -15,10 +15,11 @@ export default function Incidents() {
   const [incidents, setIncidents] = useState([])
   const [filter,    setFilter]    = useState('ALL')
   const [loading,   setLoading]   = useState(true)
+  const [selected,  setSelected] = useState(new Set())
 
   const fetchIncidents = async () => {
     try {
-      const r = await getIncidents({ limit: 100 })
+      const r = await getIncidents({ limit: 1000000 })
       setIncidents(r.data.incidents || [])
     } catch {}
     setLoading(false)
@@ -103,6 +104,55 @@ export default function Incidents() {
         </span>
       </div>
 
+      {/* Bulk Actions */}
+      {selected.size > 0 && (
+        <div style={{ ...card('#ff003c44'), marginBottom: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ ...mono(11, '#ff003c') }}>{selected.size} selected</span>
+          <button onClick={() => {
+            setSelected(new Set())
+          }} style={{
+            padding: '6px 12px', fontSize: 10, fontFamily: 'monospace',
+            background: 'transparent', border: '1px solid #333', borderRadius: 4,
+            color: '#888', cursor: 'pointer',
+          }}>Clear</button>
+          <button onClick={async () => {
+            try {
+              const ids = Array.from(selected)
+              const response = await bulkCloseIncidents(ids, 'CLOSED')
+              alert(`Closed ${response.data.closed} of ${response.data.total} incidents`)
+              setSelected(new Set())
+              fetchIncidents()
+            } catch (error) {
+              console.error('Bulk close error:', error)
+              alert('Failed to close incidents: ' + (error.response?.data?.error || error.message))
+            }
+          }} style={{
+            padding: '6px 12px', fontSize: 10, fontFamily: 'monospace',
+            background: '#00ff8822', border: '1px solid #00ff88', borderRadius: 4,
+            color: '#00ff88', cursor: 'pointer',
+          }}>Close Selected</button>
+        </div>
+      )}
+
+      {/* Select All */}
+      {filtered.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <button onClick={() => {
+            if (selected.size === filtered.length) {
+              setSelected(new Set())
+            } else {
+              setSelected(new Set(filtered.map(i => i.id)))
+            }
+          }} style={{
+            padding: '6px 12px', fontSize: 10, fontFamily: 'monospace',
+            background: 'transparent', border: '1px solid #333', borderRadius: 4,
+            color: '#888', cursor: 'pointer',
+          }}>
+            {selected.size === filtered.length ? 'Deselect All' : 'Select All (' + filtered.length + ')'}
+          </button>
+        </div>
+      )}
+
       {/* Incidents Table */}
       {loading ? (
         <div style={{ ...mono(12, '#333'), textAlign: 'center', padding: 40 }}>Loading incidents...</div>
@@ -124,19 +174,41 @@ export default function Incidents() {
             const sev   = inc.severity || 'LOW'
             const col   = SEV_COLOR[sev] || '#aaa'
             const score = inc.risk_score || 0
+            const isSelected = selected.has(inc.id)
 
             return (
               <div
                 key={inc.id}
-                onClick={() => navigate(`/incidents/${inc.id}`)}
+                onClick={(e) => {
+                  if (e.target.type !== 'checkbox') {
+                    navigate(`/incidents/${inc.id}`)
+                  }
+                }}
                 style={{
                   ...card(), cursor: 'pointer',
-                  borderColor: col + '33',
+                  borderColor: isSelected ? '#00d4ff' : col + '33',
                   display: 'flex', gap: 16, alignItems: 'center',
                   transition: 'all 0.2s',
                   ':hover': { borderColor: col },
                 }}
               >
+                {/* Checkbox */}
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={(e) => {
+                    e.stopPropagation()
+                    const newSelected = new Set(selected)
+                    if (e.target.checked) {
+                      newSelected.add(inc.id)
+                    } else {
+                      newSelected.delete(inc.id)
+                    }
+                    setSelected(newSelected)
+                  }}
+                  style={{ flexShrink: 0, cursor: 'pointer' }}
+                />
+
                 {/* Severity dot */}
                 <div style={{
                   width: 12, height: 12, borderRadius: '50%', flexShrink: 0,

@@ -914,6 +914,7 @@ class NetworkMonitor:
                     dest_port=dest_port,
                     protocol=proto,
                     geo_info=geo_display,
+                    network_severity=severity,
                     initial_events=[{
                         'time':        now.isoformat(),
                         'event':       f'{alert_type} detected',

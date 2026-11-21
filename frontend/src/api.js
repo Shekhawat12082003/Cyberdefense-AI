@@ -57,6 +57,8 @@ export const replayIncident = (id) =>
   axios.get(`${BASE}/incidents/${id}/replay`, { headers: getHeaders() })
 export const getAttackGraph = (id) =>
   axios.get(`${BASE}/incidents/${id}/attack-graph`, { headers: getHeaders() })
+export const bulkCloseIncidents = (incidentIds, response = 'CLOSED') =>
+  axios.post(`${BASE}/incidents/bulk-close`, { incident_ids: incidentIds, response }, { headers: getHeaders(), timeout: 120000 })
 
 // ── New: Honeypot ─────────────────────────────────────────
 export const getHoneypotFiles    = () => axios.get(`${BASE}/honeypot/files`,    { headers: getHeaders() })
@@ -64,8 +66,11 @@ export const getHoneypotTriggers = () => axios.get(`${BASE}/honeypot/triggers`, 
 export const getHoneypotStatus   = () => axios.get(`${BASE}/honeypot/status`,   { headers: getHeaders() })
 
 // ── New: Geolocation ──────────────────────────────────────
-export const geolocateIP = (ip) =>
-  axios.get(`${BASE}/geo/${encodeURIComponent(ip)}`, { headers: getHeaders() })
+export const geolocateIP = (ip, simulated = false) =>
+  axios.get(`${BASE}/geo/${encodeURIComponent(ip)}`, { 
+    headers: getHeaders(),
+    params: { simulated }
+  })
 
 // ── New: Risk Score ───────────────────────────────────────
 export const calculateRiskScore = (data) =>

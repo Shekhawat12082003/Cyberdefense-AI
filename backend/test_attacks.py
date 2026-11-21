@@ -90,29 +90,36 @@ def test_syn_flood(target_ip, target_port=80, packet_count=250):
     print(f"[TEST] Check dashboard for alerts if >= 200 packets in 5s")
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("  NETWORK ATTACK TEST SCRIPT")
-    print("  Tests detection thresholds for false positive prevention")
-    print("=" * 60)
-    print()
+    import sys
 
-    # Get target IP (default to localhost for testing)
-    target = input("Enter target IP (default: 127.0.0.1): ").strip()
-    if not target:
-        target = "127.0.0.1"
+    # Command-line mode for automation
+    if len(sys.argv) > 1:
+        target = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+        choice = sys.argv[2] if len(sys.argv) > 2 else "7"
+    else:
+        print("=" * 60)
+        print("  NETWORK ATTACK TEST SCRIPT")
+        print("  Tests detection thresholds for false positive prevention")
+        print("=" * 60)
+        print()
 
-    print()
-    print("Available tests:")
-    print("  1. Port Scan (60 ports - should NOT trigger, threshold is 50)")
-    print("  2. Port Scan (55 ports - should trigger, threshold is 50)")
-    print("  3. Brute Force (25 attempts - should NOT trigger, threshold is 30)")
-    print("  4. Brute Force (35 attempts - should trigger, threshold is 30)")
-    print("  5. SYN Flood (150 packets - should NOT trigger, threshold is 200)")
-    print("  6. SYN Flood (250 packets - should trigger, threshold is 200)")
-    print("  7. Run all tests")
-    print()
+        # Get target IP (default to localhost for testing)
+        target = input("Enter target IP (default: 127.0.0.1): ").strip()
+        if not target:
+            target = "127.0.0.1"
 
-    choice = input("Select test (1-7): ").strip()
+        print()
+        print("Available tests:")
+        print("  1. Port Scan (60 ports - should NOT trigger, threshold is 50)")
+        print("  2. Port Scan (55 ports - should trigger, threshold is 50)")
+        print("  3. Brute Force (25 attempts - should NOT trigger, threshold is 30)")
+        print("  4. Brute Force (35 attempts - should trigger, threshold is 30)")
+        print("  5. SYN Flood (150 packets - should NOT trigger, threshold is 200)")
+        print("  6. SYN Flood (250 packets - should trigger, threshold is 200)")
+        print("  7. Run all tests")
+        print()
+
+        choice = input("Select test (1-7): ").strip()
 
     if choice == '1':
         test_port_scan(target, 1, 60)

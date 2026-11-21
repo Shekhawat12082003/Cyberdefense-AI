@@ -1379,12 +1379,60 @@ def get_flows():
 
 @app.route('/api/alerts', methods=['GET'])
 def get_alerts():
-    """Get live alerts"""
+    """Get live alerts - includes both network alerts and incidents"""
     if not verify_token(request):
         return jsonify({'error': 'Unauthorized'}), 401
     
     limit = int(request.args.get('limit', 50))
-    return jsonify({'alerts': list(reversed(_live_alerts[-limit:])), 'total': len(_live_alerts)})
+    
+    # Get network alerts
+    network_alerts = list(reversed(_live_alerts[-limit:]))
+    
+    # Also get active incidents from the database
+    try:
+        import sqlite3
+        conn = sqlite3.connect('cyberdefense.db')
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, attack_type, source_ip, dest_ip, dest_port, 
+                   severity, risk_score, created_at, title
+            FROM incidents 
+            WHERE status = 'ACTIVE'
+            ORDER BY created_at DESC 
+            LIMIT ?
+        ''', (limit,))
+        rows = c.fetchall()
+        conn.close()
+        
+        print(f"[DEBUG] Found {len(rows)} active incidents in database")
+        
+        incident_alerts = []
+        for row in rows:
+            incident_alerts.append({
+                'id': row[0],
+                'attack_type': row[1],
+                'attacker_ip': row[2],
+                'target_ip': row[3],
+                'target_port': row[4],
+                'severity': row[5],
+                'risk_score': row[6],
+                'timestamp': row[7],
+                'description': row[8],
+                'is_verified': True,
+                'verification': 'incident_manager',
+                'source': 'incident'
+            })
+    except Exception as e:
+        print(f"[DEBUG] Error fetching incidents: {e}")
+        incident_alerts = []
+    
+    # Combine and sort by timestamp
+    all_alerts = network_alerts + incident_alerts
+    all_alerts.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    
+    print(f"[DEBUG] Returning {len(all_alerts)} total alerts ({len(network_alerts)} network, {len(incident_alerts)} incidents)")
+    
+    return jsonify({'alerts': all_alerts[:limit], 'total': len(all_alerts)})
 
 
 @app.route('/api/attackers', methods=['GET'])
@@ -1484,18 +1532,54 @@ def network_stats():
         alert for alert in verified_alerts
         if str(alert.get('timestamp', '')).startswith(today)
     ]
+    
+    # Also count incidents from the incidents table (includes simulations)
+    try:
+        import sqlite3
+        conn = sqlite3.connect('cyberdefense.db')
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM incidents WHERE status = 'ACTIVE'")
+        active_incidents = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM incidents WHERE created_at LIKE ?", (f'{today}%',))
+        incidents_today = c.fetchone()[0]
+        
+        c.execute("SELECT DISTINCT source_ip FROM incidents WHERE status = 'ACTIVE' AND source_ip IS NOT NULL")
+        incident_ips = {row[0] for row in c.fetchall()}
+        
+        c.execute("SELECT attack_type FROM incidents WHERE status = 'ACTIVE'")
+        incident_types = [row[0] for row in c.fetchall()]
+        
+        conn.close()
+        
+        incident_scans = sum(1 for t in incident_types if t == 'PORT_SCAN')
+        incident_brute_force = sum(1 for t in incident_types if t == 'BRUTE_FORCE')
+        incident_ransomware = sum(1 for t in incident_types if t == 'RANSOMWARE')
+        incident_honeypot = sum(1 for t in incident_types if t == 'HONEYPOT_ACCESS')
+    except Exception as e:
+        active_incidents = 0
+        incidents_today = 0
+        incident_ips = set()
+        incident_scans = 0
+        incident_brute_force = 0
+        incident_ransomware = 0
+        incident_honeypot = 0
+    
     stats.update({
-        'alerts_today': len(verified_today),
+        'alerts_today': len(verified_today) + incidents_today,
         'suspicious_ips': len({
             alert.get('attacker_ip') for alert in verified_today
             if alert.get('attacker_ip')
-        }),
+        }.union(incident_ips)),
         'scans_detected': sum(
             1 for alert in verified_today if alert.get('attack_type') == 'PORT_SCAN'
-        ),
+        ) + incident_scans,
         'brute_force_detected': sum(
             1 for alert in verified_today if alert.get('attack_type') == 'BRUTE_FORCE'
-        ),
+        ) + incident_brute_force,
+        'ransomware_detected': incident_ransomware,
+        'honeypot_detected': incident_honeypot,
+        'active_incidents': active_incidents,
     })
     # TShark is the packet-level source of truth. Do not expose the legacy
     # psutil/raw-socket mode while the Wi-Fi capture is still running.
@@ -1576,6 +1660,57 @@ def get_incident(incident_id):
     if not inc:
         return jsonify({'error': 'Not found'}), 404
     return jsonify(inc)
+
+
+@app.route('/api/incidents/bulk-close', methods=['POST'])
+def bulk_close_incidents():
+    """Close multiple incidents at once - optimized with direct SQL"""
+    user = verify_token(request)
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    from utils.db import get_db
+    from datetime import datetime
+    
+    data = request.get_json()
+    incident_ids = data.get('incident_ids', [])
+    response = data.get('response', 'CLOSED')
+    
+    if not incident_ids:
+        return jsonify({'error': 'No incident IDs provided'}), 400
+    
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Use direct SQL for bulk update - much faster than individual calls
+    placeholders = ','.join(['?' for _ in incident_ids])
+    now = datetime.utcnow().isoformat()
+    
+    try:
+        # Close all incidents in one query
+        cursor.execute(f"""
+            UPDATE incidents 
+            SET status = 'CLOSED', 
+                response = ?,
+                closed_at = ?,
+                updated_at = ?
+            WHERE id IN ({placeholders})
+        """, [response, now, now] + incident_ids)
+        
+        closed_count = cursor.rowcount
+        db.commit()
+        
+        return jsonify({
+            'total': len(incident_ids),
+            'closed': closed_count,
+            'failed': len(incident_ids) - closed_count,
+            'results': [{'id': inc_id, 'success': True} for inc_id in incident_ids[:closed_count]]
+        })
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cursor.close()
 
 
 @app.route('/api/incidents/<incident_id>/investigate', methods=['GET'])
@@ -1833,11 +1968,40 @@ def geolocate_ip(ip):
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
     from utils.geo_lookup import geolocate, format_geo_display
+    import random
+    scenario_id = request.args.get('scenario_id')
     geo = geolocate(ip)
+    
+    # If it's a private IP and we're in a simulation context, return simulated data
+    if geo.get('type') == 'private' and (scenario_id or request.args.get('simulated')):
+        mock_locations = [
+            {'city': 'Moscow', 'region': 'Moscow Oblast', 'country': 'RU', 'isp': 'RosTelecom', 'asn': 'AS12389', 'org': 'Russian Research Network'},
+            {'city': 'Beijing', 'region': 'Beijing', 'country': 'CN', 'isp': 'China Telecom', 'asn': 'AS4134', 'org': 'China Telecom Backbone'},
+            {'city': 'Pyongyang', 'region': 'Pyongyang', 'country': 'KP', 'isp': 'StarLink', 'asn': 'AS131696', 'org': 'Korean Central News Agency'},
+            {'city': 'Tehran', 'region': 'Tehran', 'country': 'IR', 'isp': 'Telecommunication Company', 'asn': 'AS12880', 'org': 'Iran Telecom'},
+            {'city': 'Shanghai', 'region': 'Shanghai', 'country': 'CN', 'isp': 'China Unicom', 'asn': 'AS4837', 'org': 'China Unicom Network'},
+        ]
+        mock = random.choice(mock_locations)
+        geo = {
+            'type': 'simulated',
+            'display': f"{mock['city']}, {mock['country']}",
+            'country': mock['country'],
+            'region': mock['region'],
+            'city': mock['city'],
+            'lat': None,
+            'lon': None,
+            'isp': mock['isp'],
+            'asn': mock['asn'],
+            'org': mock['org'],
+            'timezone': 'UTC',
+            'source': 'Cyber Lab Simulation',
+            'note': 'SIMULATED GEOLOCATION — for training exercise only',
+        }
+    
     return jsonify({
         'ip':      ip,
         'geo':     geo,
-        'display': format_geo_display(geo),
+        'display': format_geo_display(geo, scenario_id),
     })
 
 
@@ -2141,7 +2305,7 @@ def _build_live_incident_from_alert(alert: dict, scenario_id: str = None):
         desc      = alert.get('description', '')
 
         geo_raw     = geolocate(ip) if ip else {}
-        geo_display = format_geo_display(geo_raw) if geo_raw else {}
+        geo_display = format_geo_display(geo_raw, scenario_id) if geo_raw else {}
 
         # ── Threat Intelligence enrichment ──────────────
         threat_intel = {}
@@ -2192,6 +2356,7 @@ def _build_live_incident_from_alert(alert: dict, scenario_id: str = None):
             dest_port=dest_port,
             protocol=protocol,
             geo_info=geo_display,
+            network_severity=severity,
             initial_events=[{'time': now, 'event': f'{alert_type} detected', 'description': desc, 'severity': severity}],
         )
 
@@ -2260,7 +2425,7 @@ def _build_live_incident_from_event(event: dict):
         hp_hit     = bool(hp.get('triggered'))
 
         geo_raw     = geolocate(ip) if ip else {}
-        geo_display = format_geo_display(geo_raw) if geo_raw else {}
+        geo_display = format_geo_display(geo_raw, scenario_id) if geo_raw else {}
 
         local_ip = '127.0.0.1'
         try:
@@ -2276,7 +2441,7 @@ def _build_live_incident_from_event(event: dict):
             ml_confidence    = ml.get('confidence', 0),
             honeypot_hit     = hp_hit,
             honeypot_count   = 1 if hp_hit else 0,
-            network_alert    = attack_type if 'NETWORK' in (event.get('event_type','').upper()) else None,
+            network_alert    = attack_type if attack_type and attack_type.upper() in ['PORT_SCAN', 'BRUTE_FORCE', 'SYN_FLOOD', 'DATA_EXFIL', 'C2_BEACON', 'DOS', 'WEB_ATTACK'] else None,
             network_severity = severity,
             process_suspicious = bool(proc.get('name')),
             process_risk     = severity,
@@ -2302,6 +2467,7 @@ def _build_live_incident_from_event(event: dict):
             ml_prediction=ml.get('prediction'),
             ml_confidence=ml.get('confidence', 0),
             geo_info=geo_display,
+            network_severity=severity,
             initial_events=[{'time': now, 'event': event.get('event_type',''), 'description': event.get('description',''), 'severity': severity}],
         )
 

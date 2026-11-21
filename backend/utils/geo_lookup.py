@@ -200,12 +200,41 @@ def geolocate(ip: str) -> dict:
     }
 
 
-def format_geo_display(geo: dict) -> dict:
+def format_geo_display(geo: dict, scenario_id: str = None) -> dict:
     """Format geolocation for frontend display with appropriate disclaimers."""
     if not geo:
         return {'display': 'Unknown', 'type': 'unknown'}
 
     t = geo.get('type', 'unknown')
+
+    # For Cyber Lab simulations, provide realistic simulated data
+    if t == 'private' and scenario_id:
+        import random
+        # Generate realistic but simulated geolocation data for lab attacks
+        mock_locations = [
+            {'city': 'Moscow', 'region': 'Moscow Oblast', 'country': 'RU', 'isp': 'RosTelecom', 'asn': 'AS12389', 'org': 'Russian Research Network'},
+            {'city': 'Beijing', 'region': 'Beijing', 'country': 'CN', 'isp': 'China Telecom', 'asn': 'AS4134', 'org': 'China Telecom Backbone'},
+            {'city': 'Pyongyang', 'region': 'Pyongyang', 'country': 'KP', 'isp': 'StarLink', 'asn': 'AS131696', 'org': 'Korean Central News Agency'},
+            {'city': 'Tehran', 'region': 'Tehran', 'country': 'IR', 'isp': 'Telecommunication Company', 'asn': 'AS12880', 'org': 'Iran Telecom'},
+            {'city': 'Shanghai', 'region': 'Shanghai', 'country': 'CN', 'isp': 'China Unicom', 'asn': 'AS4837', 'org': 'China Unicom Network'},
+        ]
+        mock = random.choice(mock_locations)
+        return {
+            'type':     'simulated',
+            'display':  f"{mock['city']}, {mock['country']}",
+            'country':  mock['country'],
+            'region':   mock['region'],
+            'city':     mock['city'],
+            'lat':      None,
+            'lon':      None,
+            'isp':      mock['isp'],
+            'asn':      mock['asn'],
+            'org':      mock['org'],
+            'timezone': 'UTC',
+            'hostname': '',
+            'source':   'Cyber Lab Simulation',
+            'note':     'SIMULATED GEOLOCATION — for training exercise only',
+        }
 
     if t == 'private':
         return {

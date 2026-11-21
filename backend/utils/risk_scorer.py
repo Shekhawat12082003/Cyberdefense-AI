@@ -33,14 +33,15 @@ DEFAULT_WEIGHTS = {
 #   With HONEYPOT    → ~44  (MODERATE-HIGH)
 #   With ML + all    → ~97  (CRITICAL)
 ATTACK_SEVERITY_MULTIPLIER = {
-    'BRUTE_FORCE': 1.15,   # Active auth attack — above MODERATE
-    'PORT_SCAN':   0.80,   # Recon only
-    'SYN_FLOOD':   1.15,   # Active DoS
-    'DATA_EXFIL':  1.10,   # Data theft
-    'C2_BEACON':   1.05,   # Active C2
-    'NULL_SCAN':   0.75,   # Stealth recon
-    'XMAS_SCAN':   0.75,   # Stealth recon
-    'FIN_SCAN':    0.65,   # Stealth recon
+    'BRUTE_FORCE': 2.5,   # Active auth attack — HIGH
+    'PORT_SCAN':   2.0,   # Recon — MODERATE-HIGH
+    'SYN_FLOOD':   2.5,   # Active DoS — HIGH
+    'DATA_EXFIL':  2.2,   # Data theft — HIGH
+    'C2_BEACON':   2.0,   # Active C2 — MODERATE-HIGH
+    'RANSOMWARE':  3.0,   # Ransomware — CRITICAL
+    'NULL_SCAN':   1.5,   # Stealth recon
+    'XMAS_SCAN':   1.5,   # Stealth recon
+    'FIN_SCAN':    1.5,   # Stealth recon
 }
 
 

@@ -98,10 +98,16 @@ def create_incident(
     ml_confidence:     float        = 0.0,
     initial_events:    list         = None,
     geo_info:          dict         = None,
+    network_severity:  str          = None,
 ) -> dict:
     """Create a new incident record."""
     now  = datetime.utcnow().isoformat()
     inc_id = str(uuid.uuid4())[:12]
+
+    # Enhance geo_info with simulated data for Cyber Lab scenarios
+    if geo_info and scenario_id and geo_info.get('type') == 'private':
+        from utils.geo_lookup import format_geo_display
+        geo_info = format_geo_display(geo_info, scenario_id)
 
     # Calculate initial risk score
     rs = calculate_risk(
@@ -111,6 +117,8 @@ def create_incident(
         honeypot_hit=honeypot_hit,
         honeypot_count=1 if honeypot_hit else 0,
         process_suspicious=bool(process_name),
+        network_alert=attack_type,
+        network_severity=network_severity or severity,
     )
 
     # Build initial timeline entry
